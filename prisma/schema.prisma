@@ -1,0 +1,57 @@
+generator client { provider = "prisma-client-js" }
+
+datasource db { provider = "postgresql" url = env("DATABASE_URL") }
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  sessions  Session[]
+  audits    Audit[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId])
+}
+
+model Audit {
+  id            String      @id @default(cuid())
+  userId        String
+  idea          String
+  sector        String
+  geography     String?
+  stage         String?
+  founderName   String?
+  reportLanguage String      @default("Simple English")
+  assumptions   String
+  report        String
+  status        String      @default("completed")
+  pricePaise    Int         @default(9900)
+  computePaise  Int         @default(0)
+  marginPaise   Int         @default(0)
+  paymentStatus String      @default("pending")
+  paymentRef    String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  artifacts     ProjectFile[]
+  @@index([userId, createdAt])
+}
+
+model ProjectFile {
+  id        String   @id @default(cuid())
+  auditId   String
+  path      String
+  content   String
+  createdAt DateTime @default(now())
+  audit     Audit    @relation(fields: [auditId], references: [id], onDelete: Cascade)
+  @@unique([auditId, path])
+}

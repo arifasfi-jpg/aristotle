@@ -1,0 +1,8 @@
+@import "tailwindcss";
+
+:root { --bg:#070a0f; --panel:#0d121a; --line:#202938; --text:#f4f7fb; --muted:#93a0b5; --accent:#77e2c1; }
+* { box-sizing:border-box; }
+html { background:var(--bg); color:var(--text); }
+body { margin:0; background: radial-gradient(circle at 80% -10%, rgba(119,226,193,.10), transparent 35%), var(--bg); min-height:100vh; }
+button, input, textarea, select { font:inherit; }
+::selection { background:#77e2c1; color:#06100c; }

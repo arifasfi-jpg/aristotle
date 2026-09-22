@@ -10,241 +10,120 @@ type AuditInput = {
   language?: ReportLanguage;
 };
 
-const auditSchema = {
-  type: 'object',
-  properties: {
-    executiveSummary: { type: 'string' },
-    score: { type: 'number' },
-    verdict: { type: 'string' },
-    oneLineVerdict: { type: 'string' },
-    whatThisBusinessIs: { type: 'string' },
-    whyItCouldWork: { type: 'array', items: { type: 'string' } },
-    whatMustBeTrue: { type: 'array', items: { type: 'string' } },
-    customer: {
-      type: 'object',
-      properties: {
-        icp: { type: 'string' },
-        problem: { type: 'string' },
-        willingnessToPay: { type: 'string' }
-      },
-      required: ['icp', 'problem', 'willingnessToPay'],
-      additionalProperties: false
-    },
-    businessModel: {
-      type: 'object',
-      properties: {
-        revenueModel: { type: 'string' },
-        pricingLogic: { type: 'string' },
-        keyCostDrivers: { type: 'array', items: { type: 'string' } }
-      },
-      required: ['revenueModel', 'pricingLogic', 'keyCostDrivers'],
-      additionalProperties: false
-    },
-    marketView: {
-      type: 'object',
-      properties: {
-        marketType: { type: 'string' },
-        demandSignal: { type: 'string' },
-        competition: { type: 'string' },
-        marketRisk: { type: 'string' }
-      },
-      required: ['marketType', 'demandSignal', 'competition', 'marketRisk'],
-      additionalProperties: false
-    },
-    unitEconomics: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          metric: { type: 'string' },
-          conservative: { type: 'number' },
-          base: { type: 'number' },
-          upside: { type: 'number' },
-          unit: { type: 'string' },
-          commentary: { type: 'string' }
-        },
-        required: ['metric', 'conservative', 'base', 'upside', 'unit', 'commentary'],
-        additionalProperties: false
-      }
-    },
-    operatingModel: { type: 'array', items: { type: 'string' } },
-    technologyBuild: {
-      type: 'object',
-      properties: {
-        mvp: { type: 'array', items: { type: 'string' } },
-        avoidBuilding: { type: 'array', items: { type: 'string' } },
-        estimatedBuildApproach: { type: 'string' }
-      },
-      required: ['mvp', 'avoidBuilding', 'estimatedBuildApproach'],
-      additionalProperties: false
-    },
-    regulatory: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          name: { type: 'string' },
-          status: { type: 'string' },
-          rationale: { type: 'string' },
-          action: { type: 'string' },
-          source: { type: 'string' }
-        },
-        required: ['name', 'status', 'rationale', 'action', 'source'],
-        additionalProperties: false
-      }
-    },
-    vulnerabilities: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          risk: { type: 'string' },
-          probability: { type: 'string' },
-          impact: { type: 'string' },
-          whyItMatters: { type: 'string' },
-          mitigation: { type: 'string' }
-        },
-        required: ['risk', 'probability', 'impact', 'whyItMatters', 'mitigation'],
-        additionalProperties: false
-      }
-    },
-    goToMarket: { type: 'array', items: { type: 'string' } },
-    thirtyDayPlan: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          week: { type: 'string' },
-          objective: { type: 'string' },
-          actions: { type: 'array', items: { type: 'string' } },
-          successMetric: { type: 'string' }
-        },
-        required: ['week', 'objective', 'actions', 'successMetric'],
-        additionalProperties: false
-      }
-    },
-    killOrScale: {
-      type: 'object',
-      properties: {
-        scaleWhen: { type: 'array', items: { type: 'string' } },
-        pauseWhen: { type: 'array', items: { type: 'string' } }
-      },
-      required: ['scaleWhen', 'pauseWhen'],
-      additionalProperties: false
-    },
-    assumptions: { type: 'array', items: { type: 'string' } },
-    nextSteps: { type: 'array', items: { type: 'string' } }
-  },
-  required: [
-    'executiveSummary','score','verdict','oneLineVerdict','whatThisBusinessIs',
-    'whyItCouldWork','whatMustBeTrue','customer','businessModel','marketView',
-    'unitEconomics','operatingModel','technologyBuild','regulatory',
-    'vulnerabilities','goToMarket','thirtyDayPlan','killOrScale',
-    'assumptions','nextSteps'
-  ],
-  additionalProperties: false
-};
-
 export async function runAudit(input: AuditInput) {
   const fallback = deterministicAudit(input);
   const key = process.env.OPENAI_API_KEY;
 
   if (!key) {
-    return { report: fallback, pricing: estimateCompute(0, 0), provider: 'deterministic' };
+    return {
+      report: fallback,
+      pricing: estimateCompute(0, 0),
+      provider: 'deterministic-no-key',
+    };
   }
 
   const client = new OpenAI({ apiKey: key });
 
-  const languageInstruction = input.language === 'Hinglish'
-    ? 'Write in natural Indian Hinglish using Roman script. Use simple English mixed with common Hindi words. Do not overdo slang. Every sentence must be understandable to a normal Indian founder.'
-    : 'Write in very simple, direct English. Short sentences. Avoid consulting jargon. If a business term is unavoidable, explain it in plain English.';
+  const languageInstruction =
+    input.language === 'Hinglish'
+      ? `Write in natural Indian Hinglish using Roman script. Keep business terms such as CAC, AOV,
+GMV, contribution margin and payback in English, but explain them simply. Do not use forced slang.`
+      : `Write in very simple, direct English. Short sentences. Avoid consulting jargon.
+If a business term is necessary, define it in plain English.`;
 
   const prompt = `
-You are Aristotle, an India-focused venture screening partner.
+You are Aristotle, an India-focused venture screening and business-model analysis engine.
 
-Your job is to audit a founder's business idea, not to praise it and not to write generic startup advice.
-
-The output must feel like a short paid decision memo prepared by a strong strategy team:
-- Start with the answer.
-- Analyse the actual idea.
-- Be specific to the sector, customer, business model and geography.
-- Challenge the founder's assumptions.
-- Quantify wherever a reasonable calculation is possible.
-- Clearly distinguish facts, sourced information, estimates and unknowns.
-- Never manufacture customer demand, market size, competitor numbers, regulatory certainty or unit economics.
-- If information is unavailable, say exactly what is unknown and give the cheapest practical test to find out.
-- Do not use empty phrases such as "conduct market research", "leverage technology", "build a strong brand", or "focus on customer needs" unless you make them specific and measurable.
+Your output is a paid founder decision memo. It must feel like a serious, evidence-led consulting engagement:
+crisp, specific, quantified where possible, and directly tied to the founder's exact idea.
 
 ${languageInstruction}
 
-RESEARCH RULES
-1. Use web search when it materially improves the analysis, especially for Indian regulations, current competitors/substitutes, current market structure, credible market data, and current pricing or public business-model information.
-2. Prefer primary sources: RBI, SEBI, IRDAI, NPCI, GST/CBIC, MeitY, BIS, Udyam/MSME, Ministry of Education, government portals and company websites.
-3. For factual claims based on web research, include the source URL in the relevant text where practical.
-4. Never invent a source or URL.
-5. If no reliable source is available, label the statement as an estimate or assumption.
-6. Regulatory analysis is screening only, not legal/tax advice.
+CRITICAL RULE: Do NOT produce generic startup advice. Before analysing the idea, reconstruct the actual business model.
 
-UNIT ECONOMICS RULES
-- Use founder-provided numbers if available.
-- Otherwise use explicitly labelled illustrative assumptions.
-- Explain important calculations in commentary, for example: "₹1,200 revenue - ₹540 direct variable cost = ₹660 gross contribution."
-- Conservative/base/upside must represent different assumptions, not arbitrary numbers.
-- If CAC is unknown, call it illustrative and specify how to validate it.
-- Choose the correct unit for the business: customer/month, project, order, lead, device, transaction, etc.
-- Do not force a transaction model onto a business where it makes no sense.
+STEP 1 — RECONSTRUCT THE IDEA
+Determine from the founder's description:
+1. What exactly is being sold?
+2. Who is the customer, payer and beneficiary?
+3. Who fulfils it and who owns inventory/assets?
+4. Who receives money and bears refunds, returns, delivery failures and disputes?
+5. What is the transaction/revenue unit and likely frequency?
+6. How does the business make money?
+7. What operational activity does the platform itself perform?
+8. What business archetype best describes it: SaaS, marketplace, transaction platform, commerce, services, fintech, infrastructure, consumer app, etc.?
+9. What is the single biggest assumption that could make it fail?
 
-SCREENING SCORE
-Give a 0-100 screening score, but do not pretend it is scientifically precise.
-Base it on:
-1. Problem severity/frequency
-2. Evidence of willingness to pay
-3. Market accessibility
-4. Unit-economic potential
-5. Execution/regulatory feasibility
-If evidence is weak, reduce confidence and say why.
+Do not blindly trust the sector dropdown. Infer the business model from the idea. If ambiguous, state the ambiguity and analyse the most reasonable interpretation. Do not invent missing operating details.
 
-REQUIRED REPORT
+STEP 2 — RESEARCH THE ACTUAL BUSINESS
+Use web search before making substantive claims about current Indian regulations, licensing, named competitors, market data, current pricing, payment/API/platform costs or relevant industry facts.
+Prefer primary sources: Indian government departments, regulators, statutory authorities, company websites, official pricing pages, annual reports and official documentation. Use reputable secondary sources only when primary data is unavailable.
+Never invent a competitor, statistic, regulation, source or URL.
+Distinguish important claims as VERIFIED, FOUNDER INPUT, ASSUMPTION or INFERENCE. If reliable current evidence cannot be found, say “Not verified”.
 
-1. Bottom line: 3-5 sentences answering what the business is, strongest reason it could work, biggest reason it could fail, and what the founder should do next.
-2. Screening score with the main drivers.
-3. Rewrite the raw idea into one clean business description and identify who pays.
-4. Give 3 concrete, idea-specific mechanisms for why it could work.
-5. Give 3-5 falsifiable conditions that must be true.
-6. Identify a sharply defined initial ICP, specific pain, current workaround and switching reason.
-7. State willingness-to-pay evidence and propose a paid pilot/deposit/pre-order/LOI or other observable commitment.
-8. Identify who pays, what they pay for, when they pay, monetisation options and key gross-margin drivers.
-9. Analyse the actual market. Identify direct competitors only when evidence exists, plus indirect competitors and the status quo. Do not invent TAM. If credible market data exists, give source/date; otherwise use bottom-up sizing and label it an estimate.
-10. Give conservative/base/upside unit economics with revenue, direct variable cost/gross contribution, CAC and contribution after CAC where meaningful. Explain important numbers and confidence.
-11. Explain what should remain manual, what can be outsourced, and what should eventually be automated.
-12. Give the smallest MVP, what not to build, and the appropriate manual/no-code/low-code/software approach.
-13. Cover GST, MSME/Udyam, BIS, DPDP and sector-specific requirements only where relevant. Use Likely/Conditional/Low signal, explain why, give an action, and prefer official sources.
-14. Give at least 5 idea-specific risks with probability, impact, why it matters, mitigation and evidence needed.
-15. Give a specific GTM sequence: first segment, acquisition route, offer, sales motion and proof point.
-16. Give four weekly validation plans with concrete actions and PASS/FAIL success criteria.
-17. Give observable scale conditions and pause/rethink conditions.
-18. List important assumptions and clearly distinguish founder-provided facts from Aristotle assumptions.
-19. Give no more than 5 immediate next steps, ordered by priority.
+STEP 3 — ANALYSE THE REAL ALTERNATIVE
+Competition is not just companies in the same sector. Identify what the target customer does TODAY instead: WhatsApp, calls, spreadsheets, POS/ERP, staff, marketplaces, banks, payment gateways, distributors, manual processes, etc.
+Explain the current alternative's cost/pain, why the customer might switch, and why they might refuse. Name 3–5 relevant competitors/substitutes only when evidence supports them.
 
-FOUNDER INPUT
+STEP 4 — BUILD IDEA-SPECIFIC UNIT ECONOMICS
+Never use generic SaaS economics unless the actual business is SaaS.
+Choose metrics matching the model. Examples: marketplace = orders × AOV × take-rate − payment − delivery − refunds − support − acquisition; transaction infrastructure = transaction value × fee − processing − support − acquisition; SaaS = customers × monthly revenue − hosting/API/support/sales; commerce = orders × gross margin − fulfilment − payment − returns − acquisition; services = projects × price − delivery cost − acquisition.
+Show conservative/base/upside scenarios. Label every numeric assumption as founder input, researched figure or illustrative assumption. Where inputs are missing, show formulas and reasonable illustrative ranges rather than pretending they are known.
+Calculate relevant metrics such as revenue per customer/order, gross contribution, contribution margin, CAC, CAC payback and break-even volume where applicable.
+
+STEP 5 — REGULATORY RADAR
+Do not dump a standard checklist into every report. Assess regulation based on what the business ACTUALLY DOES.
+For each relevant item explain: why it applies/may apply; the activity that triggers it; what must be verified/obtained; whether the source is current law, official guidance, draft/proposed rule or historical material; and the actual source URL when available.
+Potential areas include GST, MSME/Udyam, DPDP, consumer protection, BIS, Shops & Establishments and sector-specific licensing such as drugs/medical, RBI/payment, insurance, education, food, telecom, etc. Only include a sector-specific rule if the model actually touches that activity.
+Example: software serving licensed pharmacies is not automatically the same as an e-pharmacy or drug seller. Analyse the distinction and how operational choices change regulatory exposure. Do not say “confirm RBI/IRDAI/SEBI” merely because an idea is digital or financial. Name the specific activity creating the question. This is screening information, not legal advice.
+
+STEP 6 — DECISION ANALYSIS
+Answer: what is this business really; why might customers pay; what must be true; what is the economic engine; biggest vulnerability; what to test before building; what NOT to build yet.
+Use measurable hypotheses. Example: “Interview 20 target customers and test whether at least 6 will commit to a 30-day paid pilot at ₹X/month.” Clearly label such thresholds as proposed validation criteria, not industry facts.
+
+STEP 7 — SCREENING SCORE
+Provide a 0–100 screening score as an internal framework, not an investment rating. Base it on five explicit dimensions: customer pain/urgency, willingness to pay/monetisation, economic attractiveness, execution complexity, regulatory/dependency risk. Make drivers idea-specific.
+
+REQUIRED REPORT STRUCTURE
+1. Bottom line — 3–5 sentences answering the founder's question.
+2. Screening score — 0–100 with explicit idea-specific drivers.
+3. What this business actually is — operating model and money flow.
+4. Why it could work — 3–5 evidence-linked reasons.
+5. What must be true — 4–6 measurable hypotheses.
+6. Customer — exact ICP, payer, beneficiary, pain and willingness-to-pay test.
+7. Business model — revenue unit, pricing logic, money flow and variable costs.
+8. Market & competition — current customer alternative + named competitors/substitutes.
+9. Unit economics — conservative/base/upside with formulas and labelled assumptions.
+10. Operating model — what must happen and what should remain manual initially.
+11. Technology build — MVP versus what NOT to build.
+12. India regulatory radar — only relevant rules, with current sources and status.
+13. Vulnerability matrix — probability, impact, why it matters, mitigation.
+14. Go-to-market — exact first customer acquisition sequence.
+15. First 30 days — four weeks, actions and measurable success criteria.
+16. Scale / pause criteria — numerical validation thresholds.
+17. Assumptions — separate founder inputs from assumptions/inferences.
+18. Next steps — maximum 7 concrete actions.
+
+QUALITY BAR
+Before returning JSON, silently check: Did I analyse the actual business model rather than its sector label? Did I identify who pays and what they pay for? Did I identify the customer's current alternative? Are unit economics specific? Did I avoid made-up market numbers? Did I research relevant current regulations? Did I avoid irrelevant regulations? Did I name real competitors/substitutes only when supported? Did I distinguish facts, founder inputs, assumptions and inference? Are the 30-day actions measurable? Could a founder actually make a build/test/pause decision from this report?
+
+Founder input:
 Idea: ${input.idea}
-Sector: ${input.sector}
+Sector selected by founder: ${input.sector}
 Stage: ${input.stage || 'Idea / pre-launch'}
-Geography: ${input.geography || 'India'}
+Primary geography: ${input.geography || 'India'}
 
-FINAL QUALITY CHECK
-Before returning JSON, internally challenge the report:
-- If a statement would still be true after changing the idea, make it more specific.
-- If a number was invented, convert it to an assumption and explain the formula.
-- If something is called a competitor without evidence, label it as an alternative/category.
-- If a regulatory conclusion depends on the exact activity, make it conditional.
-- Ensure there is a clear first experiment with a pass/fail threshold.
-- Ensure the first screen tells the founder what to do tomorrow morning.
-
-Return valid JSON matching the supplied schema. Do not return markdown outside the JSON.
+Return valid JSON matching the supplied schema exactly. Keep the report dense but readable. Do not add markdown outside the JSON.
 `;
 
   try {
+    console.log(JSON.stringify({
+      event: 'aristotle_audit_start',
+      sector: input.sector,
+      stage: input.stage,
+      geography: input.geography,
+    }));
+
     const response = await client.responses.create({
       model: process.env.OPENAI_MODEL || 'gpt-5.6-luna',
       tools: [{ type: 'web_search' }],
@@ -254,24 +133,162 @@ Return valid JSON matching the supplied schema. Do not return markdown outside t
           type: 'json_schema',
           name: 'aristotle_audit',
           strict: true,
-          schema: auditSchema
-        }
-      }
+          schema: {
+            type: 'object',
+            properties: {
+              executiveSummary: { type: 'string' },
+              score: { type: 'number' },
+              verdict: { type: 'string' },
+              oneLineVerdict: { type: 'string' },
+              whatThisBusinessIs: { type: 'string' },
+              whyItCouldWork: { type: 'array', items: { type: 'string' } },
+              whatMustBeTrue: { type: 'array', items: { type: 'string' } },
+              customer: {
+                type: 'object',
+                properties: {
+                  icp: { type: 'string' },
+                  problem: { type: 'string' },
+                  willingnessToPay: { type: 'string' },
+                },
+                required: ['icp', 'problem', 'willingnessToPay'],
+                additionalProperties: false,
+              },
+              businessModel: {
+                type: 'object',
+                properties: {
+                  revenueModel: { type: 'string' },
+                  pricingLogic: { type: 'string' },
+                  keyCostDrivers: { type: 'array', items: { type: 'string' } },
+                },
+                required: ['revenueModel', 'pricingLogic', 'keyCostDrivers'],
+                additionalProperties: false,
+              },
+              marketView: {
+                type: 'object',
+                properties: {
+                  marketType: { type: 'string' },
+                  demandSignal: { type: 'string' },
+                  competition: { type: 'string' },
+                  marketRisk: { type: 'string' },
+                },
+                required: ['marketType', 'demandSignal', 'competition', 'marketRisk'],
+                additionalProperties: false,
+              },
+              unitEconomics: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    metric: { type: 'string' },
+                    conservative: { type: 'number' },
+                    base: { type: 'number' },
+                    upside: { type: 'number' },
+                    unit: { type: 'string' },
+                    commentary: { type: 'string' },
+                  },
+                  required: ['metric', 'conservative', 'base', 'upside', 'unit', 'commentary'],
+                  additionalProperties: false,
+                },
+              },
+              operatingModel: { type: 'array', items: { type: 'string' } },
+              technologyBuild: {
+                type: 'object',
+                properties: {
+                  mvp: { type: 'array', items: { type: 'string' } },
+                  avoidBuilding: { type: 'array', items: { type: 'string' } },
+                  estimatedBuildApproach: { type: 'string' },
+                },
+                required: ['mvp', 'avoidBuilding', 'estimatedBuildApproach'],
+                additionalProperties: false,
+              },
+              regulatory: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    name: { type: 'string' },
+                    status: { type: 'string' },
+                    rationale: { type: 'string' },
+                    action: { type: 'string' },
+                    source: { type: 'string' },
+                  },
+                  required: ['name', 'status', 'rationale', 'action', 'source'],
+                  additionalProperties: false,
+                },
+              },
+              vulnerabilities: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    risk: { type: 'string' },
+                    probability: { type: 'string' },
+                    impact: { type: 'string' },
+                    whyItMatters: { type: 'string' },
+                    mitigation: { type: 'string' },
+                  },
+                  required: ['risk', 'probability', 'impact', 'whyItMatters', 'mitigation'],
+                  additionalProperties: false,
+                },
+              },
+              goToMarket: { type: 'array', items: { type: 'string' } },
+              thirtyDayPlan: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    week: { type: 'string' },
+                    objective: { type: 'string' },
+                    actions: { type: 'array', items: { type: 'string' } },
+                    successMetric: { type: 'string' },
+                  },
+                  required: ['week', 'objective', 'actions', 'successMetric'],
+                  additionalProperties: false,
+                },
+              },
+              killOrScale: {
+                type: 'object',
+                properties: {
+                  scaleWhen: { type: 'array', items: { type: 'string' } },
+                  pauseWhen: { type: 'array', items: { type: 'string' } },
+                },
+                required: ['scaleWhen', 'pauseWhen'],
+                additionalProperties: false,
+              },
+              assumptions: { type: 'array', items: { type: 'string' } },
+              nextSteps: { type: 'array', items: { type: 'string' } },
+            },
+            required: [
+              'executiveSummary','score','verdict','oneLineVerdict','whatThisBusinessIs',
+              'whyItCouldWork','whatMustBeTrue','customer','businessModel','marketView',
+              'unitEconomics','operatingModel','technologyBuild','regulatory','vulnerabilities',
+              'goToMarket','thirtyDayPlan','killOrScale','assumptions','nextSteps'
+            ],
+            additionalProperties: false,
+          },
+        },
+      },
     });
 
     const report = JSON.parse(response.output_text) as AuditReport;
     const usage = response.usage;
 
+    console.log(JSON.stringify({
+      event: 'aristotle_audit_complete',
+      inputTokens: usage?.input_tokens || 0,
+      outputTokens: usage?.output_tokens || 0,
+    }));
+
     return {
       report,
       pricing: estimateCompute(usage?.input_tokens || 0, usage?.output_tokens || 0),
-      provider: 'openai-web-research'
+      provider: 'openai-web-research',
     };
-  } catch {
-    return {
-      report: fallback,
-      pricing: estimateCompute(0, 0),
-      provider: 'deterministic-fallback'
-    };
+  } catch (error) {
+    console.error(
+      'Aristotle research audit failed:',
+      error instanceof Error ? error.message : error,
+    );
+    throw new Error('Research engine failed. No unresearched fallback report was returned. Please retry the audit.');
   }
 }

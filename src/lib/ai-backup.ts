@@ -10,48 +10,11 @@ type AuditInput = {
   language?: ReportLanguage;
 };
 
-
-type TavilyResult = { title?: string; url?: string; content?: string; score?: number };
-
-async function tavilySearch(query: string): Promise<TavilyResult[]> {
-  const key = process.env.TAVILY_API_KEY;
-  if (!key) throw new Error('TAVILY_API_KEY is not configured');
-  const response = await fetch('https://api.tavily.com/search', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      api_key: key,
-      query,
-      search_depth: 'advanced',
-      max_results: 5,
-      include_answer: false,
-      include_raw_content: false,
-    }),
-  });
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Tavily search failed (${response.status}): ${body.slice(0, 500)}`);
-  }
-  const data = await response.json();
-  return Array.isArray(data?.results) ? data.results : [];
-}
-
-function cleanJson(text: string): string {
-  const trimmed = text.trim();
-  if (trimmed.startsWith('```')) {
-    return trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-  }
-  const first = trimmed.indexOf('{');
-  const last = trimmed.lastIndexOf('}');
-  return first >= 0 && last > first ? trimmed.slice(first, last + 1) : trimmed;
-}
-
 export async function runAudit(input: AuditInput) {
   const fallback = deterministicAudit(input);
-  const nvidiaKey = process.env.NVIDIA_API_KEY;
-  const tavilyKey = process.env.TAVILY_API_KEY;
+  const key = process.env.OPENAI_API_KEY;
 
-  if (!nvidiaKey || !tavilyKey) {
+  if (!key) {
     return {
       report: fallback,
       pricing: estimateCompute(0, 0),
@@ -59,10 +22,7 @@ export async function runAudit(input: AuditInput) {
     };
   }
 
-  const client = new OpenAI({
-    apiKey: nvidiaKey,
-    baseURL: 'https://integrate.api.nvidia.com/v1',
-  });
+  const client = new OpenAI({ apiKey: key });
 
   const languageInstruction =
     input.language === 'Hinglish'
@@ -153,10 +113,7 @@ Sector selected by founder: ${input.sector}
 Stage: ${input.stage || 'Idea / pre-launch'}
 Primary geography: ${input.geography || 'India'}
 
-FRESH WEB RESEARCH
-${'__RESEARCH__'}
-
-Return ONLY valid JSON matching the supplied schema exactly. Keep the report dense but readable. Do not add markdown outside the JSON.
+Return valid JSON matching the supplied schema exactly. Keep the report dense but readable. Do not add markdown outside the JSON.
 `;
 
   try {
@@ -167,61 +124,165 @@ Return ONLY valid JSON matching the supplied schema exactly. Keep the report den
       geography: input.geography,
     }));
 
-    const queries = [
-      `"${input.idea}" ${input.geography || 'India'} regulations licensing compliance`,
-      `${input.sector} ${input.geography || 'India'} current competitors alternatives pricing`,
-      `${input.idea} ${input.geography || 'India'} customer market demand`,
-      `${input.sector} ${input.geography || 'India'} software platforms competitors official pricing`,
-      `${input.idea} ${input.geography || 'India'} payments delivery platform costs`,
-      `${input.sector} ${input.geography || 'India'} government regulator official rules`,
-    ];
-
-    const researchGroups = await Promise.all(
-      queries.map(async (query) => ({ query, results: await tavilySearch(query) })),
-    );
-
-    const research = researchGroups.map(({ query, results }) => [
-      `SEARCH QUERY: ${query}`,
-      ...results.map((r) => [
-        `TITLE: ${r.title || 'Untitled'}`,
-        `URL: ${r.url || ''}`,
-        `CONTENT: ${(r.content || '').slice(0, 5000)}`,
-      ].join('\n')),
-    ].join('\n\n')).join('\n\n---\n\n').slice(0, 60000);
-
-    const finalPrompt = prompt.replace("${'__RESEARCH__'}", research);
-
-    const completion = await client.chat.completions.create({
-      model: process.env.NVIDIA_MODEL || 'nvidia/nemotron-3.5-lightning-30b-a3b',
-      messages: [
-        {
-          role: 'system',
-          content: 'You are a rigorous venture analyst. Follow the requested JSON schema exactly. Never invent evidence. Use the supplied research and clearly label uncertainty.',
+    const response = await client.responses.create({
+      model: process.env.OPENAI_MODEL || 'gpt-5.6-luna',
+      tools: [{ type: 'web_search' }],
+      input: prompt,
+      text: {
+        format: {
+          type: 'json_schema',
+          name: 'aristotle_audit',
+          strict: true,
+          schema: {
+            type: 'object',
+            properties: {
+              executiveSummary: { type: 'string' },
+              score: { type: 'number' },
+              verdict: { type: 'string' },
+              oneLineVerdict: { type: 'string' },
+              whatThisBusinessIs: { type: 'string' },
+              whyItCouldWork: { type: 'array', items: { type: 'string' } },
+              whatMustBeTrue: { type: 'array', items: { type: 'string' } },
+              customer: {
+                type: 'object',
+                properties: {
+                  icp: { type: 'string' },
+                  problem: { type: 'string' },
+                  willingnessToPay: { type: 'string' },
+                },
+                required: ['icp', 'problem', 'willingnessToPay'],
+                additionalProperties: false,
+              },
+              businessModel: {
+                type: 'object',
+                properties: {
+                  revenueModel: { type: 'string' },
+                  pricingLogic: { type: 'string' },
+                  keyCostDrivers: { type: 'array', items: { type: 'string' } },
+                },
+                required: ['revenueModel', 'pricingLogic', 'keyCostDrivers'],
+                additionalProperties: false,
+              },
+              marketView: {
+                type: 'object',
+                properties: {
+                  marketType: { type: 'string' },
+                  demandSignal: { type: 'string' },
+                  competition: { type: 'string' },
+                  marketRisk: { type: 'string' },
+                },
+                required: ['marketType', 'demandSignal', 'competition', 'marketRisk'],
+                additionalProperties: false,
+              },
+              unitEconomics: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    metric: { type: 'string' },
+                    conservative: { type: 'number' },
+                    base: { type: 'number' },
+                    upside: { type: 'number' },
+                    unit: { type: 'string' },
+                    commentary: { type: 'string' },
+                  },
+                  required: ['metric', 'conservative', 'base', 'upside', 'unit', 'commentary'],
+                  additionalProperties: false,
+                },
+              },
+              operatingModel: { type: 'array', items: { type: 'string' } },
+              technologyBuild: {
+                type: 'object',
+                properties: {
+                  mvp: { type: 'array', items: { type: 'string' } },
+                  avoidBuilding: { type: 'array', items: { type: 'string' } },
+                  estimatedBuildApproach: { type: 'string' },
+                },
+                required: ['mvp', 'avoidBuilding', 'estimatedBuildApproach'],
+                additionalProperties: false,
+              },
+              regulatory: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    name: { type: 'string' },
+                    status: { type: 'string' },
+                    rationale: { type: 'string' },
+                    action: { type: 'string' },
+                    source: { type: 'string' },
+                  },
+                  required: ['name', 'status', 'rationale', 'action', 'source'],
+                  additionalProperties: false,
+                },
+              },
+              vulnerabilities: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    risk: { type: 'string' },
+                    probability: { type: 'string' },
+                    impact: { type: 'string' },
+                    whyItMatters: { type: 'string' },
+                    mitigation: { type: 'string' },
+                  },
+                  required: ['risk', 'probability', 'impact', 'whyItMatters', 'mitigation'],
+                  additionalProperties: false,
+                },
+              },
+              goToMarket: { type: 'array', items: { type: 'string' } },
+              thirtyDayPlan: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: {
+                    week: { type: 'string' },
+                    objective: { type: 'string' },
+                    actions: { type: 'array', items: { type: 'string' } },
+                    successMetric: { type: 'string' },
+                  },
+                  required: ['week', 'objective', 'actions', 'successMetric'],
+                  additionalProperties: false,
+                },
+              },
+              killOrScale: {
+                type: 'object',
+                properties: {
+                  scaleWhen: { type: 'array', items: { type: 'string' } },
+                  pauseWhen: { type: 'array', items: { type: 'string' } },
+                },
+                required: ['scaleWhen', 'pauseWhen'],
+                additionalProperties: false,
+              },
+              assumptions: { type: 'array', items: { type: 'string' } },
+              nextSteps: { type: 'array', items: { type: 'string' } },
+            },
+            required: [
+              'executiveSummary','score','verdict','oneLineVerdict','whatThisBusinessIs',
+              'whyItCouldWork','whatMustBeTrue','customer','businessModel','marketView',
+              'unitEconomics','operatingModel','technologyBuild','regulatory','vulnerabilities',
+              'goToMarket','thirtyDayPlan','killOrScale','assumptions','nextSteps'
+            ],
+            additionalProperties: false,
+          },
         },
-        { role: 'user', content: finalPrompt },
-      ],
-      temperature: 0.2,
-      top_p: 0.8,
-      max_tokens: 12000,
+      },
     });
 
-    const text = completion.choices?.[0]?.message?.content;
-    if (!text) throw new Error('NVIDIA returned an empty response');
-
-    const report = JSON.parse(cleanJson(text)) as AuditReport;
-    const usage = completion.usage;
+    const report = JSON.parse(response.output_text) as AuditReport;
+    const usage = response.usage;
 
     console.log(JSON.stringify({
       event: 'aristotle_audit_complete',
-      inputTokens: usage?.prompt_tokens || 0,
-      outputTokens: usage?.completion_tokens || 0,
-      provider: 'nvidia-tavily',
+      inputTokens: usage?.input_tokens || 0,
+      outputTokens: usage?.output_tokens || 0,
     }));
 
     return {
       report,
-      pricing: estimateCompute(usage?.prompt_tokens || 0, usage?.completion_tokens || 0),
-      provider: 'nvidia-tavily-research',
+      pricing: estimateCompute(usage?.input_tokens || 0, usage?.output_tokens || 0),
+      provider: 'openai-web-research',
     };
   } catch (error) {
     console.error(

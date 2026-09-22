@@ -82,7 +82,7 @@ export async function POST(req: Request) {
 
       return NextResponse.json(
         {
-          error: `Audit engine failed: ${message}`,
+          error: 'Audit engine failed',
           detail: message,
         },
         { status: 502 }
@@ -164,7 +164,7 @@ export async function POST(req: Request) {
 
       return NextResponse.json(
         {
-          error: `Audit was generated but could not be saved: ${message}`,
+          error: 'Audit was generated but could not be saved',
           detail: message,
         },
         { status: 500 }
@@ -183,7 +183,7 @@ export async function POST(req: Request) {
 
     return NextResponse.json(
       {
-        error: `Payment verification request failed: ${message}`,
+        error: 'Payment verification request failed',
         detail: message,
       },
       { status: 500 }

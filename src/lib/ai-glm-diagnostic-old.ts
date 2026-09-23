@@ -205,7 +205,7 @@ Return ONLY valid JSON. No markdown outside JSON.
     let completion;
     try {
       completion = await client.chat.completions.create({
-        model: process.env.NVIDIA_MODEL || 'z-ai/glm-5.3-flash',
+        model: process.env.NVIDIA_MODEL || 'z-ai/glm-5-3-flash',
         messages: [
           {
             role: 'system',

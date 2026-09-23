@@ -82,7 +82,7 @@ export async function runAudit(input: AuditInput) {
   const client = new OpenAI({
     apiKey: nvidiaKey,
     baseURL: 'https://integrate.api.nvidia.com/v1',
-    timeout: 25000,
+    timeout: 45000,
     maxRetries: 0,
   });
 
@@ -205,7 +205,7 @@ Return ONLY valid JSON. No markdown outside JSON.
     let completion;
     try {
       completion = await client.chat.completions.create({
-        model: process.env.NVIDIA_MODEL || 'deepseek-ai/deepseek-v4.1-flash',
+        model: process.env.NVIDIA_MODEL || 'z-ai/glm-5.3-flash',
         messages: [
           {
             role: 'system',
@@ -232,13 +232,13 @@ Return ONLY valid JSON. No markdown outside JSON.
       event: 'aristotle_audit_complete',
       inputTokens: usage?.prompt_tokens || 0,
       outputTokens: usage?.completion_tokens || 0,
-      provider: 'nvidia-deepseek-flash-tavily-fast',
+      provider: 'nvidia-glm-flash-tavily-fast',
     }));
 
     return {
       report,
       pricing: estimateCompute(usage?.prompt_tokens || 0, usage?.completion_tokens || 0),
-      provider: 'nvidia-deepseek-flash-tavily-fast',
+      provider: 'nvidia-glm-flash-tavily-fast',
     };
   } catch (error) {
     console.error(

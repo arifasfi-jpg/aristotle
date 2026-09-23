@@ -1,3 +1,4 @@
+import OpenAI from 'openai';
 import { deterministicAudit, Sector, AuditReport, ReportLanguage } from './audit';
 import { estimateCompute } from './pricing';
 
@@ -67,16 +68,23 @@ function cleanJson(text: string): string {
 
 export async function runAudit(input: AuditInput) {
   const fallback = deterministicAudit(input);
-  const geminiKey = process.env.GEMINI_API_KEY;
+  const nvidiaKey = process.env.NVIDIA_API_KEY;
   const tavilyKey = process.env.TAVILY_API_KEY;
 
-  if (!geminiKey || !tavilyKey) {
+  if (!nvidiaKey || !tavilyKey) {
     return {
       report: fallback,
       pricing: estimateCompute(0, 0),
       provider: 'deterministic-no-key',
     };
   }
+
+  const client = new OpenAI({
+    apiKey: nvidiaKey,
+    baseURL: 'https://integrate.api.nvidia.com/v1',
+    timeout: 25000,
+    maxRetries: 0,
+  });
 
   const languageInstruction =
     input.language === 'Hinglish'
@@ -194,94 +202,43 @@ Return ONLY valid JSON. No markdown outside JSON.
 
     const finalPrompt = prompt.replace('__RESEARCH__', research);
 
-    let geminiResponse: Response;
+    let completion;
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 25000);
-
-      try {
-        geminiResponse = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite'}:generateContent`,
+      completion = await client.chat.completions.create({
+        model: process.env.NVIDIA_MODEL || 'deepseek-ai/deepseek-v4.1-flash',
+        messages: [
           {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-goog-api-key': geminiKey,
-            },
-            body: JSON.stringify({
-              contents: [
-                {
-                  role: 'user',
-                  parts: [
-                    {
-                      text:
-                        'You are a rigorous venture analyst. Return valid JSON only. Never invent evidence. Use supplied research and label uncertainty.\n\n' +
-                        finalPrompt,
-                    },
-                  ],
-                },
-              ],
-              generationConfig: {
-                responseMimeType: 'application/json',
-                maxOutputTokens: 5000,
-              },
-            }),
-            signal: controller.signal,
+            role: 'system',
+            content: 'You are a rigorous venture analyst. Return valid JSON only. Never invent evidence. Use supplied research and label uncertainty.',
           },
-        );
-      } finally {
-        clearTimeout(timeout);
-      }
+          { role: 'user', content: finalPrompt },
+        ],
+        temperature: 0.1,
+        top_p: 0.8,
+        max_tokens: 3000,
+      });
     } catch (error) {
-      const detail =
-        error instanceof Error && error.name === 'AbortError'
-          ? 'Request timed out after 25 seconds'
-          : error instanceof Error
-            ? error.message
-            : String(error);
-      throw new Error(`GEMINI_ERROR: ${detail}`);
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`NVIDIA_ERROR: ${detail}`);
     }
 
-    if (!geminiResponse.ok) {
-      const body = await geminiResponse.text();
-      throw new Error(
-        `GEMINI_ERROR: HTTP ${geminiResponse.status}: ${body.slice(0, 600)}`
-      );
-    }
-
-    const geminiJson = await geminiResponse.json() as {
-      candidates?: Array<{
-        content?: { parts?: Array<{ text?: string }> };
-      }>;
-      usageMetadata?: {
-        promptTokenCount?: number;
-        candidatesTokenCount?: number;
-        totalTokenCount?: number;
-      };
-    };
-
-    const text =
-      geminiJson.candidates?.[0]?.content?.parts
-        ?.map((part) => part.text || '')
-        .join('') || '';
-
-    if (!text) throw new Error('GEMINI_ERROR: Gemini returned an empty response');
+    const text = completion.choices?.[0]?.message?.content;
+    if (!text) throw new Error('NVIDIA returned an empty response');
 
     const report = JSON.parse(cleanJson(text)) as AuditReport;
-    const inputTokens = geminiJson.usageMetadata?.promptTokenCount || 0;
-    const outputTokens = geminiJson.usageMetadata?.candidatesTokenCount || 0;
+    const usage = completion.usage;
 
     console.log(JSON.stringify({
       event: 'aristotle_audit_complete',
-      inputTokens,
-      outputTokens,
-      provider: 'gemini-3.5-flash-lite-tavily',
+      inputTokens: usage?.prompt_tokens || 0,
+      outputTokens: usage?.completion_tokens || 0,
+      provider: 'nvidia-deepseek-flash-tavily-fast',
     }));
 
     return {
       report,
-      pricing: estimateCompute(inputTokens, outputTokens),
-      provider: 'gemini-3.5-flash-lite-tavily',
+      pricing: estimateCompute(usage?.prompt_tokens || 0, usage?.completion_tokens || 0),
+      provider: 'nvidia-deepseek-flash-tavily-fast',
     };
   } catch (error) {
     console.error(

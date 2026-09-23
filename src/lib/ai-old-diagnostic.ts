@@ -41,14 +41,14 @@ async function tavilySearch(query: string): Promise<TavilyResult[]> {
 
     if (!response.ok) {
       const body = await response.text();
-      throw new Error(`TAVILY_ERROR ${response.status}: ${body.slice(0, 500)}`);
+      throw new Error(`Tavily search failed (${response.status}): ${body.slice(0, 300)}`);
     }
 
     const data = await response.json();
     return Array.isArray(data?.results) ? data.results : [];
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(`TAVILY_TIMEOUT after 12 seconds`);
+      throw new Error(`Tavily search timed out after 12 seconds`);
     }
     throw error;
   } finally {
@@ -202,25 +202,19 @@ Return ONLY valid JSON. No markdown outside JSON.
 
     const finalPrompt = prompt.replace('__RESEARCH__', research);
 
-    let completion;
-    try {
-      completion = await client.chat.completions.create({
-        model: process.env.NVIDIA_MODEL || 'z-ai/glm-5-3-flash',
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a rigorous venture analyst. Return valid JSON only. Never invent evidence. Use supplied research and label uncertainty.',
-          },
-          { role: 'user', content: finalPrompt },
-        ],
-        temperature: 0.1,
-        top_p: 0.8,
-        max_tokens: 3000,
-      });
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(`NVIDIA_ERROR: ${detail}`);
-    }
+    const completion = await client.chat.completions.create({
+      model: process.env.NVIDIA_MODEL || 'z-ai/glm-5-3-flash',
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a rigorous venture analyst. Return valid JSON only. Never invent evidence. Use supplied research and label uncertainty.',
+        },
+        { role: 'user', content: finalPrompt },
+      ],
+      temperature: 0.1,
+      top_p: 0.8,
+      max_tokens: 3000,
+    });
 
     const text = completion.choices?.[0]?.message?.content;
     if (!text) throw new Error('NVIDIA returned an empty response');

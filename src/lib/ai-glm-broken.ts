@@ -214,6 +214,8 @@ Return ONLY valid JSON. No markdown outside JSON.
       temperature: 0.1,
       top_p: 0.8,
       max_tokens: 3000,
+      reasoning_effort: 'low',
+      clear_thinking: true,
     });
 
     const text = completion.choices?.[0]?.message?.content;

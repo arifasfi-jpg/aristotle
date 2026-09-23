@@ -203,7 +203,7 @@ Return ONLY valid JSON. No markdown outside JSON.
     const finalPrompt = prompt.replace('__RESEARCH__', research);
 
     const completion = await client.chat.completions.create({
-      model: process.env.NVIDIA_MODEL || 'nvidia/nemotron-3.5-lightning-30b-a3b',
+      model: process.env.NVIDIA_MODEL || 'openai/gpt-oss-20b',
       messages: [
         {
           role: 'system',
@@ -226,13 +226,13 @@ Return ONLY valid JSON. No markdown outside JSON.
       event: 'aristotle_audit_complete',
       inputTokens: usage?.prompt_tokens || 0,
       outputTokens: usage?.completion_tokens || 0,
-      provider: 'nvidia-tavily-fast',
+      provider: 'nvidia-gpt-oss-tavily-fast',
     }));
 
     return {
       report,
       pricing: estimateCompute(usage?.prompt_tokens || 0, usage?.completion_tokens || 0),
-      provider: 'nvidia-tavily-fast',
+      provider: 'nvidia-gpt-oss-tavily-fast',
     };
   } catch (error) {
     console.error(

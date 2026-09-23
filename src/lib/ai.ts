@@ -16,18 +16,31 @@ type TavilyResult = { title?: string; url?: string; content?: string; score?: nu
 async function tavilySearch(query: string): Promise<TavilyResult[]> {
   const key = process.env.TAVILY_API_KEY;
   if (!key) throw new Error('TAVILY_API_KEY is not configured');
-  const response = await fetch('https://api.tavily.com/search', {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20000);
+  let response: Response;
+  try {
+    response = await fetch('https://api.tavily.com/search', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal: controller.signal,
     body: JSON.stringify({
       api_key: key,
       query,
       search_depth: 'advanced',
-      max_results: 5,
+      max_results: 3,
       include_answer: false,
       include_raw_content: false,
     }),
-  });
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`Tavily search timed out after 20 seconds for: ${query}`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
   if (!response.ok) {
     const body = await response.text();
     throw new Error(`Tavily search failed (${response.status}): ${body.slice(0, 500)}`);
@@ -62,6 +75,8 @@ export async function runAudit(input: AuditInput) {
   const client = new OpenAI({
     apiKey: nvidiaKey,
     baseURL: 'https://integrate.api.nvidia.com/v1',
+    timeout: 90000,
+    maxRetries: 0,
   });
 
   const languageInstruction =
@@ -170,15 +185,24 @@ Return ONLY valid JSON matching the supplied schema exactly. Keep the report den
     const queries = [
       `"${input.idea}" ${input.geography || 'India'} regulations licensing compliance`,
       `${input.sector} ${input.geography || 'India'} current competitors alternatives pricing`,
-      `${input.idea} ${input.geography || 'India'} customer market demand`,
-      `${input.sector} ${input.geography || 'India'} software platforms competitors official pricing`,
-      `${input.idea} ${input.geography || 'India'} payments delivery platform costs`,
-      `${input.sector} ${input.geography || 'India'} government regulator official rules`,
+      `${input.idea} ${input.geography || 'India'} customer demand market alternatives`,
+      `${input.sector} ${input.geography || 'India'} official regulator rules platform costs`,
     ];
 
-    const researchGroups = await Promise.all(
+    // Run a small number of searches in parallel. Individual failures are tolerated,
+    // but the audit never silently falls back to an unresearched report.
+    const settled = await Promise.allSettled(
       queries.map(async (query) => ({ query, results: await tavilySearch(query) })),
     );
+    const researchGroups = settled.flatMap((result) =>
+      result.status === 'fulfilled' ? [result.value] : [],
+    );
+    if (researchGroups.length === 0) {
+      const failures = settled
+        .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+        .map((result) => result.reason instanceof Error ? result.reason.message : String(result.reason));
+      throw new Error(`All Tavily research calls failed: ${failures.join(' | ')}`);
+    }
 
     const research = researchGroups.map(({ query, results }) => [
       `SEARCH QUERY: ${query}`,
@@ -187,7 +211,7 @@ Return ONLY valid JSON matching the supplied schema exactly. Keep the report den
         `URL: ${r.url || ''}`,
         `CONTENT: ${(r.content || '').slice(0, 5000)}`,
       ].join('\n')),
-    ].join('\n\n')).join('\n\n---\n\n').slice(0, 60000);
+    ].join('\n\n')).join('\n\n---\n\n').slice(0, 30000);
 
     const finalPrompt = prompt.replace("${'__RESEARCH__'}", research);
 
@@ -202,7 +226,7 @@ Return ONLY valid JSON matching the supplied schema exactly. Keep the report den
       ],
       temperature: 0.2,
       top_p: 0.8,
-      max_tokens: 12000,
+      max_tokens: 8000,
     });
 
     const text = completion.choices?.[0]?.message?.content;
@@ -228,6 +252,7 @@ Return ONLY valid JSON matching the supplied schema exactly. Keep the report den
       'Aristotle research audit failed:',
       error instanceof Error ? error.message : error,
     );
-    throw new Error('Research engine failed. No unresearched fallback report was returned. Please retry the audit.');
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Research engine failed: ${message}`);
   }
 }

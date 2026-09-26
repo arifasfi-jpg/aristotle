@@ -65,6 +65,293 @@ function cleanJson(text: string): string {
   return first >= 0 && last > first ? trimmed.slice(first, last + 1) : trimmed;
 }
 
+// ---------------------------------------------------------------------------
+// Gemini responseSchema — mirrors AuditReport exactly so field names and
+// types are enforced by the model, not inferred from a free-text prompt.
+// ---------------------------------------------------------------------------
+const AUDIT_RESPONSE_SCHEMA = {
+  type: 'object',
+  properties: {
+    executiveSummary: { type: 'string' },
+    score: { type: 'number' },
+    verdict: { type: 'string' },
+    oneLineVerdict: { type: 'string' },
+    whatThisBusinessIs: { type: 'string' },
+    whyItCouldWork: { type: 'array', items: { type: 'string' } },
+    whatMustBeTrue: { type: 'array', items: { type: 'string' } },
+    customer: {
+      type: 'object',
+      properties: {
+        icp: { type: 'string' },
+        problem: { type: 'string' },
+        willingnessToPay: { type: 'string' },
+      },
+      required: ['icp', 'problem', 'willingnessToPay'],
+    },
+    businessModel: {
+      type: 'object',
+      properties: {
+        revenueModel: { type: 'string' },
+        pricingLogic: { type: 'string' },
+        keyCostDrivers: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['revenueModel', 'pricingLogic', 'keyCostDrivers'],
+    },
+    marketView: {
+      type: 'object',
+      properties: {
+        marketType: { type: 'string' },
+        demandSignal: { type: 'string' },
+        competition: { type: 'string' },
+        marketRisk: { type: 'string' },
+      },
+      required: ['marketType', 'demandSignal', 'competition', 'marketRisk'],
+    },
+    unitEconomics: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          metric: { type: 'string' },
+          conservative: { type: 'number' },
+          base: { type: 'number' },
+          upside: { type: 'number' },
+          unit: { type: 'string' },
+          commentary: { type: 'string' },
+        },
+        required: ['metric', 'conservative', 'base', 'upside', 'unit', 'commentary'],
+      },
+    },
+    operatingModel: { type: 'array', items: { type: 'string' } },
+    technologyBuild: {
+      type: 'object',
+      properties: {
+        mvp: { type: 'array', items: { type: 'string' } },
+        avoidBuilding: { type: 'array', items: { type: 'string' } },
+        estimatedBuildApproach: { type: 'string' },
+      },
+      required: ['mvp', 'avoidBuilding', 'estimatedBuildApproach'],
+    },
+    regulatory: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          status: { type: 'string' },
+          rationale: { type: 'string' },
+          action: { type: 'string' },
+          source: { type: 'string' },
+        },
+        required: ['name', 'status', 'rationale', 'action', 'source'],
+      },
+    },
+    vulnerabilities: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          risk: { type: 'string' },
+          probability: { type: 'string' },
+          impact: { type: 'string' },
+          whyItMatters: { type: 'string' },
+          mitigation: { type: 'string' },
+        },
+        required: ['risk', 'probability', 'impact', 'whyItMatters', 'mitigation'],
+      },
+    },
+    goToMarket: { type: 'array', items: { type: 'string' } },
+    thirtyDayPlan: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          week: { type: 'string' },
+          objective: { type: 'string' },
+          actions: { type: 'array', items: { type: 'string' } },
+          successMetric: { type: 'string' },
+        },
+        required: ['week', 'objective', 'actions', 'successMetric'],
+      },
+    },
+    killOrScale: {
+      type: 'object',
+      properties: {
+        scaleWhen: { type: 'array', items: { type: 'string' } },
+        pauseWhen: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['scaleWhen', 'pauseWhen'],
+    },
+    assumptions: { type: 'array', items: { type: 'string' } },
+    nextSteps: { type: 'array', items: { type: 'string' } },
+  },
+  required: [
+    'executiveSummary', 'score', 'verdict', 'oneLineVerdict', 'whatThisBusinessIs',
+    'whyItCouldWork', 'whatMustBeTrue', 'customer', 'businessModel', 'marketView',
+    'unitEconomics', 'operatingModel', 'technologyBuild', 'regulatory', 'vulnerabilities',
+    'goToMarket', 'thirtyDayPlan', 'killOrScale', 'assumptions', 'nextSteps',
+  ],
+};
+
+// ---------------------------------------------------------------------------
+// Prompt builder
+// ---------------------------------------------------------------------------
+function buildPrompt(input: AuditInput, research: string): string {
+  const lang =
+    input.language === 'Hinglish'
+      ? 'Write every string value in natural Indian Hinglish (Roman script). Keep business/legal terms in English and explain them simply.'
+      : 'Write every string value in simple, direct English. Use short sentences. Avoid jargon.';
+
+  return `You are Aristotle, an India-focused venture screening and business-model analysis engine.
+You produce a paid founder decision memo.
+
+FOUNDER INPUT IS THE SOURCE OF TRUTH FOR THIS BUSINESS MODEL. Extract every explicit commercial fact from the founder's idea before making assumptions. If the founder specifies pricing, customer type, AOV, transaction volume, commission, subscription, operating model, geography, delivery model, or other economics, use those values in the report. Do not replace founder-provided economics with generic sector assumptions.
+
+OUTPUT RULES
+- Return ONLY the AuditReport JSON schema provided by responseSchema. Do not add extra fields. Do not use numbered sections as an alternative JSON structure. The JSON field names and types must exactly match the schema.
+- No markdown outside the JSON. No commentary wrapping the JSON. No code fences.
+- Do not invent field names. Use exactly: executiveSummary, score, verdict, oneLineVerdict, whatThisBusinessIs, whyItCouldWork, whatMustBeTrue, customer, businessModel, marketView, unitEconomics, operatingModel, technologyBuild, regulatory, vulnerabilities, goToMarket, thirtyDayPlan, killOrScale, assumptions, nextSteps.
+
+LANGUAGE INSTRUCTION
+${lang}
+
+════════════════════════════════════════════════════════════
+FOUNDER INPUT  — treat every field as the PRIMARY source of truth
+════════════════════════════════════════════════════════════
+Idea (verbatim):  ${input.idea}
+Sector:           ${input.sector}
+Stage:            ${input.stage || 'Idea / pre-launch'}
+Geography:        ${input.geography || 'India'}
+
+STEP 1 — EXTRACT FROM THE IDEA ABOVE (before writing anything):
+• Who is the specific paying customer? (job title, business type, size, location)
+• What exact painful problem exists TODAY for that customer?
+• What is the proposed product or service?
+• What is the revenue model? (subscription, per-transaction, hybrid, etc.)
+• If pricing is mentioned, quote it exactly — do NOT replace it with a sector default.
+• What does the founder do vs. what the customer/partner does?
+• What are the primary cost drivers for THIS business?
+
+STEP 2 — BUILD THE REPORT using your extraction above.
+
+════════════════════════════════════════════════════════════
+FIELD-BY-FIELD INSTRUCTIONS
+════════════════════════════════════════════════════════════
+
+executiveSummary (string)
+  2–3 sentences. Name the specific customer, problem, revenue model and score.
+  BAD: "This is a SaaS business with recurring revenue."
+  GOOD: "Aristotle-Rx targets independent pharmacy owners in Tier-2 India who manage inventory manually. The ₹1,499/month + ₹5/order model needs ~40 active dispensing pharmacies to cover cloud + support costs. Score: 61/100 — demand is plausible but the sales cycle to pharmacy owners is long and the competitive set includes well-funded players."
+
+score (number, 0–100)
+  Derive from: problem urgency, willingness to pay evidence, unit economics viability,
+  regulatory risk, competitive intensity, founder execution risk.
+  Do not default to 67. Justify internally.
+
+verdict (string) — one clear sentence on the core risk.
+
+oneLineVerdict (string) — single sentence action directive for the founder.
+
+whatThisBusinessIs (string)
+  Describe the EXACT business, not the sector. Name what is sold, to whom, how delivered, how paid.
+
+whyItCouldWork (array of strings, 3–5 items)
+  Must be specific to THIS business. Not generic startup wisdom.
+
+whatMustBeTrue (array of strings, 4–6 items)
+  Specific falsifiable assumptions. Not generic startup checklist.
+
+customer
+  icp: Name the specific customer segment, geography, firmographic or demographic profile.
+  problem: Describe the current painful workaround and its cost in time/money/risk.
+  willingnessToPay: What evidence or proxy suggests they will pay? At what price point?
+
+businessModel
+  revenueModel: Describe the exact revenue streams as described or implied by the founder.
+  pricingLogic: If pricing is specified in the idea, use it. Analyse the logic behind it.
+                If not specified, propose a specific model with reasoning.
+  keyCostDrivers: Array of 4–6 cost items specific to this operating model.
+
+marketView
+  marketType: Category and dynamics specific to this business.
+  demandSignal: What early demand evidence exists or is implied? Be honest about uncertainty.
+  competition: Name actual competitors or substitutes from research. Include "do nothing" and
+               existing manual/software alternatives. Mark unverified names as INFERENCE.
+  marketRisk: The single biggest market-level risk specific to this idea.
+
+unitEconomics (array of 3–6 rows)
+  CRITICAL: Build from the actual business model and pricing described.
+  If the idea mentions ₹1,499/month + ₹5/order, model BOTH streams.
+  Do NOT use generic sector averages as the primary estimate.
+  Each row: metric, conservative (number), base (number), upside (number), unit (string),
+  commentary (string explaining the assumption behind the numbers).
+  All three scenario values must be finite numbers (integers or decimals). No strings, no nulls.
+  Suggested rows for subscription+transaction model:
+    - Monthly subscription revenue per customer
+    - Orders processed per customer per month
+    - Revenue per order
+    - Gross contribution per customer per month
+    - Customer acquisition cost
+    - Months to payback
+  Adjust row selection to fit the actual business model.
+
+operatingModel (array of strings, 3–5 items)
+  How the business actually runs day-to-day. Specific to this idea.
+
+technologyBuild
+  mvp: 4–6 specific things to build first for THIS product.
+  avoidBuilding: 3–5 things NOT to build yet, specific to this idea.
+  estimatedBuildApproach: Concrete build path for this product.
+
+regulatory (array of objects)
+  ONLY include regulations triggered by the ACTUAL business activity.
+  For each rule ask: "Does this business actually do the activity that triggers this rule?"
+  If not triggered, OMIT it. Do not include GST/MSME/DPDP/BIS/RBI/SEBI/IRDAI by default.
+  Each object: name, status ("Likely"|"Conditional"|"Low signal"), rationale, action, source (real URL).
+  For a pharmacy software platform: include Drugs & Cosmetics Act only if dispensing is involved;
+  include IT Act/DPDP if patient data is processed; include GST only if it materially affects the model.
+
+vulnerabilities (array of 4–6 objects)
+  Risks specific to THIS business. probability and impact: "Low"|"Medium"|"High".
+  Not a generic startup risk checklist.
+
+goToMarket (array of strings, 4–6 items)
+  Specific, actionable GTM steps for this customer and this product.
+
+thirtyDayPlan (array of exactly 4 objects: Week 1, Week 2, Week 3, Week 4)
+  Each: week, objective, actions (array of strings), successMetric.
+  Tailor to the specific validation milestones for this business.
+
+killOrScale
+  scaleWhen: 4–5 specific, measurable criteria for THIS business.
+  pauseWhen: 4–5 specific warning signals for THIS business.
+
+assumptions (array of strings, 4–6 items)
+  State the key assumptions underlying this analysis. Be honest about what is INFERENCE vs VERIFIED.
+
+nextSteps (array of strings, 5–7 items)
+  Concrete actions the founder should take this week. Specific to this idea.
+
+════════════════════════════════════════════════════════════
+RESEARCH  (use to improve market, competitor, regulatory sections)
+════════════════════════════════════════════════════════════
+${research}
+
+════════════════════════════════════════════════════════════
+EVIDENCE RULES
+════════════════════════════════════════════════════════════
+- Never invent a statistic, competitor name, regulation, price or URL.
+- Mark unverified claims with (INFERENCE) or (NOT VERIFIED).
+- Prefer primary government/regulator/company sources for regulatory URLs.
+- If research is thin, reflect genuine uncertainty — do not fill gaps with generic advice.
+- Do not import financial-regulation sections (RBI, SEBI, IRDAI, lending, insurance)
+  unless the founder's idea explicitly involves those activities.
+`;
+}
+
+// ---------------------------------------------------------------------------
+// Main export
+// ---------------------------------------------------------------------------
 export async function runAudit(input: AuditInput) {
   const fallback = deterministicAudit(input);
   const geminiKey = process.env.GEMINI_API_KEY;
@@ -77,81 +364,6 @@ export async function runAudit(input: AuditInput) {
       provider: 'deterministic-no-key',
     };
   }
-
-  const languageInstruction =
-    input.language === 'Hinglish'
-      ? 'Write in natural Indian Hinglish in Roman script. Keep business terms in English and explain them simply.'
-      : 'Write in very simple, direct English. Use short sentences. Avoid jargon.';
-
-  const prompt = `
-You are Aristotle, an India-focused venture screening and business-model analysis engine.
-
-${languageInstruction}
-
-Create a paid founder decision memo based on the founder's EXACT business idea and the supplied fresh research.
-
-First reconstruct the model:
-- what is sold
-- customer, payer and beneficiary
-- who fulfils it and owns inventory/assets
-- money flow, refunds, delivery/disputes
-- revenue unit and frequency
-- monetisation
-- platform operating activity
-- business archetype
-- biggest failure assumption
-
-Then analyse:
-- customer pain and willingness to pay
-- current alternatives and 3-5 relevant competitors/substitutes where evidence supports them
-- idea-specific unit economics with conservative/base/upside scenarios
-- relevant Indian regulation only; identify the activity that triggers each rule
-- operating model and manual MVP
-- technology MVP and what NOT to build
-- vulnerabilities with probability, impact and mitigation
-- GTM and first 30 days
-- measurable scale/pause criteria
-
-Evidence rules:
-- Prefer primary government/regulator/company sources.
-- Never invent a statistic, competitor, regulation, pricing figure or URL.
-- Clearly distinguish FOUNDER INPUT, VERIFIED, ASSUMPTION and INFERENCE.
-- If evidence is unavailable, say "Not verified".
-- Do not dump irrelevant GST/MSME/DPDP/BIS/RBI/SEBI/IRDAI rules into the report.
-
-REQUIRED REPORT STRUCTURE
-1. Bottom line
-2. Screening score with five explicit drivers
-3. What this business actually is
-4. Why it could work
-5. What must be true
-6. Customer
-7. Business model
-8. Market & competition
-9. Unit economics
-10. Operating model
-11. Technology build
-12. India regulatory radar
-13. Vulnerability matrix
-14. Go-to-market
-15. First 30 days
-16. Scale / pause criteria
-17. Assumptions
-18. Next steps (maximum 7)
-
-Keep the report dense but readable and specific to the idea. Do not give generic startup advice.
-
-FOUNDER INPUT
-Idea: ${input.idea}
-Sector selected: ${input.sector}
-Stage: ${input.stage || 'Idea / pre-launch'}
-Primary geography: ${input.geography || 'India'}
-
-FRESH WEB RESEARCH
-__RESEARCH__
-
-Return ONLY valid JSON. No markdown outside JSON.
-`;
 
   try {
     console.log(JSON.stringify({
@@ -192,7 +404,7 @@ Return ONLY valid JSON. No markdown outside JSON.
       ].join('\n')),
     ].join('\n')).join('\n---\n').slice(0, 14000);
 
-    const finalPrompt = prompt.replace('__RESEARCH__', research);
+    const finalPrompt = buildPrompt(input, research);
 
     let geminiResponse: Response;
     try {
@@ -212,18 +424,15 @@ Return ONLY valid JSON. No markdown outside JSON.
               contents: [
                 {
                   role: 'user',
-                  parts: [
-                    {
-                      text:
-                        'You are a rigorous venture analyst. Return valid JSON only. Never invent evidence. Use supplied research and label uncertainty.\n\n' +
-                        finalPrompt,
-                    },
-                  ],
+                  parts: [{ text: finalPrompt }],
                 },
               ],
               generationConfig: {
                 responseMimeType: 'application/json',
-                maxOutputTokens: 5000,
+                // responseSchema enforces exact field names and types — this is the
+                // primary fix for generic/misnamed fields in the Gemini output.
+                responseSchema: AUDIT_RESPONSE_SCHEMA,
+                maxOutputTokens: 8192,
               },
             }),
             signal: controller.signal,
@@ -275,13 +484,13 @@ Return ONLY valid JSON. No markdown outside JSON.
       event: 'aristotle_audit_complete',
       inputTokens,
       outputTokens,
-      provider: 'gemini-3.5-flash-lite-tavily',
+      provider: 'gemini-structured-tavily',
     }));
 
     return {
       report,
       pricing: estimateCompute(inputTokens, outputTokens),
-      provider: 'gemini-3.5-flash-lite-tavily',
+      provider: 'gemini-structured-tavily',
     };
   } catch (error) {
     console.error(

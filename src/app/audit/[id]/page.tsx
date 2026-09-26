@@ -12,13 +12,19 @@ export default async function AuditPage({params}:{params:Promise<{id:string}>}){
  const audit=await db.audit.findFirst({where:{id,userId:user.id}}); if(!audit)return notFound();
  if(audit.status!=='completed')return <main className="mx-auto max-w-4xl px-6 py-20"><h1 className="text-3xl font-semibold">Audit processing</h1><p className="mt-3 text-[#93a0b5]">This audit has not completed yet.</p></main>;
  const raw=JSON.parse(audit.report) as Partial<AuditReport>;
+ // obj: safely spread a value as a plain object, fall back to {} if it isn't one
  const obj=(v:unknown)=>v&&typeof v==='object'&&!Array.isArray(v)?v as Record<string,unknown>:{};
+ // arr: use the value only if it really is an array, otherwise use the fallback
  const arr=<T,>(v:unknown,fallback:T[])=>Array.isArray(v)?v as T[]:fallback;
+ // num: use the value only if it is a finite number, otherwise use the fallback
+ const num=(v:unknown,fallback:number)=>typeof v==='number'&&isFinite(v)?v:fallback;
  const base=deterministicAudit({idea:audit.idea,sector:audit.sector as any,stage:audit.stage||undefined,geography:audit.geography||'India',language:(audit.reportLanguage as any)||'Simple English'});
+ // Merge top-level scalar fields
+ const rawBM=obj(raw.businessModel); const rawTB=obj(raw.technologyBuild); const rawKS=obj(raw.killOrScale);
  const r={
   ...base,
   ...raw,
-  score:typeof raw.score==='number'?raw.score:base.score,
+  score:num(raw.score,base.score),
   executiveSummary:typeof raw.executiveSummary==='string'?raw.executiveSummary:base.executiveSummary,
   verdict:typeof raw.verdict==='string'?raw.verdict:base.verdict,
   oneLineVerdict:typeof raw.oneLineVerdict==='string'?raw.oneLineVerdict:base.oneLineVerdict,
@@ -26,16 +32,38 @@ export default async function AuditPage({params}:{params:Promise<{id:string}>}){
   whyItCouldWork:arr(raw.whyItCouldWork,base.whyItCouldWork),
   whatMustBeTrue:arr(raw.whatMustBeTrue,base.whatMustBeTrue),
   customer:{...base.customer,...obj(raw.customer)},
-  businessModel:{...base.businessModel,...obj(raw.businessModel)},
+  businessModel:{
+   ...base.businessModel,...rawBM,
+   // keyCostDrivers must be an array — Gemini sometimes omits it inside the spread object
+   keyCostDrivers:arr(rawBM.keyCostDrivers,base.businessModel.keyCostDrivers),
+  },
   marketView:{...base.marketView,...obj(raw.marketView)},
-  unitEconomics:arr(raw.unitEconomics,base.unitEconomics),
+  // Guard each unitEconomics row's numeric fields so Math.round() never receives a non-number
+  unitEconomics:arr(raw.unitEconomics,base.unitEconomics).map((x,i)=>{
+   const b=base.unitEconomics[i]??base.unitEconomics[0];
+   return{...x,conservative:num(x.conservative,b.conservative),base:num(x.base,b.base),upside:num(x.upside,b.upside)};
+  }),
   operatingModel:arr(raw.operatingModel,base.operatingModel),
-  technologyBuild:{...base.technologyBuild,...obj(raw.technologyBuild)},
+  technologyBuild:{
+   ...base.technologyBuild,...rawTB,
+   // mvp and avoidBuilding must be arrays — Gemini may omit them inside the spread object
+   mvp:arr(rawTB.mvp,base.technologyBuild.mvp),
+   avoidBuilding:arr(rawTB.avoidBuilding,base.technologyBuild.avoidBuilding),
+  },
   regulatory:arr(raw.regulatory,base.regulatory),
   vulnerabilities:arr(raw.vulnerabilities,base.vulnerabilities),
   goToMarket:arr(raw.goToMarket,base.goToMarket),
-  thirtyDayPlan:arr(raw.thirtyDayPlan,base.thirtyDayPlan),
-  killOrScale:{...base.killOrScale,...obj(raw.killOrScale)},
+  // Guard each thirtyDayPlan row's actions array
+  thirtyDayPlan:arr(raw.thirtyDayPlan,base.thirtyDayPlan).map((x,i)=>{
+   const b=base.thirtyDayPlan[i]??base.thirtyDayPlan[0];
+   return{...x,actions:arr(x.actions,b?.actions??[])};
+  }),
+  killOrScale:{
+   ...base.killOrScale,...rawKS,
+   // scaleWhen and pauseWhen must be arrays
+   scaleWhen:arr(rawKS.scaleWhen,base.killOrScale.scaleWhen),
+   pauseWhen:arr(rawKS.pauseWhen,base.killOrScale.pauseWhen),
+  },
   assumptions:arr(raw.assumptions,base.assumptions),
   nextSteps:arr(raw.nextSteps,base.nextSteps),
  } as AuditReport;

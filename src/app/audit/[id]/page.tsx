@@ -11,7 +11,34 @@ export default async function AuditPage({params}:{params:Promise<{id:string}>}){
  if(!user)return <main className="mx-auto max-w-4xl px-6 py-20"><h1 className="text-3xl font-semibold">Session required</h1><p className="mt-3 text-[#93a0b5]">Open this audit in the same browser session used to submit it.</p></main>;
  const audit=await db.audit.findFirst({where:{id,userId:user.id}}); if(!audit)return notFound();
  if(audit.status!=='completed')return <main className="mx-auto max-w-4xl px-6 py-20"><h1 className="text-3xl font-semibold">Audit processing</h1><p className="mt-3 text-[#93a0b5]">This audit has not completed yet.</p></main>;
- const raw=JSON.parse(audit.report) as Partial<AuditReport>; const base=deterministicAudit({idea:audit.idea,sector:audit.sector as any,stage:audit.stage||undefined,geography:audit.geography||'India',language:(audit.reportLanguage as any)||'Simple English'}); const r={...base,...raw,customer:raw.customer||base.customer,businessModel:raw.businessModel||base.businessModel,marketView:raw.marketView||base.marketView,technologyBuild:raw.technologyBuild||base.technologyBuild,killOrScale:raw.killOrScale||base.killOrScale} as AuditReport;
+ const raw=JSON.parse(audit.report) as Partial<AuditReport>;
+ const obj=(v:unknown)=>v&&typeof v==='object'&&!Array.isArray(v)?v as Record<string,unknown>:{};
+ const arr=<T,>(v:unknown,fallback:T[])=>Array.isArray(v)?v as T[]:fallback;
+ const base=deterministicAudit({idea:audit.idea,sector:audit.sector as any,stage:audit.stage||undefined,geography:audit.geography||'India',language:(audit.reportLanguage as any)||'Simple English'});
+ const r={
+  ...base,
+  ...raw,
+  score:typeof raw.score==='number'?raw.score:base.score,
+  executiveSummary:typeof raw.executiveSummary==='string'?raw.executiveSummary:base.executiveSummary,
+  verdict:typeof raw.verdict==='string'?raw.verdict:base.verdict,
+  oneLineVerdict:typeof raw.oneLineVerdict==='string'?raw.oneLineVerdict:base.oneLineVerdict,
+  whatThisBusinessIs:typeof raw.whatThisBusinessIs==='string'?raw.whatThisBusinessIs:base.whatThisBusinessIs,
+  whyItCouldWork:arr(raw.whyItCouldWork,base.whyItCouldWork),
+  whatMustBeTrue:arr(raw.whatMustBeTrue,base.whatMustBeTrue),
+  customer:{...base.customer,...obj(raw.customer)},
+  businessModel:{...base.businessModel,...obj(raw.businessModel)},
+  marketView:{...base.marketView,...obj(raw.marketView)},
+  unitEconomics:arr(raw.unitEconomics,base.unitEconomics),
+  operatingModel:arr(raw.operatingModel,base.operatingModel),
+  technologyBuild:{...base.technologyBuild,...obj(raw.technologyBuild)},
+  regulatory:arr(raw.regulatory,base.regulatory),
+  vulnerabilities:arr(raw.vulnerabilities,base.vulnerabilities),
+  goToMarket:arr(raw.goToMarket,base.goToMarket),
+  thirtyDayPlan:arr(raw.thirtyDayPlan,base.thirtyDayPlan),
+  killOrScale:{...base.killOrScale,...obj(raw.killOrScale)},
+  assumptions:arr(raw.assumptions,base.assumptions),
+  nextSteps:arr(raw.nextSteps,base.nextSteps),
+ } as AuditReport;
  return <main className="mx-auto max-w-6xl px-6 py-10 pb-20">
   <div className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between"><div><div className="text-xs uppercase tracking-[.2em] text-[#77e2c1]">ARISTOTLE · FOUNDER DECISION MEMO · {audit.sector}</div><h1 className="mt-3 max-w-4xl text-4xl font-semibold tracking-tight md:text-5xl">{audit.idea}</h1><p className="mt-3 text-sm text-[#7f8da3]">Prepared {audit.createdAt.toLocaleString('en-IN')} · {audit.reportLanguage}</p></div><a href={`/api/audits/${audit.id}/export`} className="inline-flex items-center justify-center gap-2 rounded-xl border border-[#3a4657] px-4 py-3 font-medium hover:border-[#77e2c1]"><ArrowDownToLine size={17}/> Lock-and-Barrel Export</a></div>
 

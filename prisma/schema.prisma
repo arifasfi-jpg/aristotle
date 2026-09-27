@@ -8,7 +8,8 @@ datasource db {
 }
 model User {
   id        String   @id @default(cuid())
-  email     String   @unique
+  // Optional: new visitors get a fresh account with no email. Email is never used to authenticate.
+  email     String?  @unique
   name      String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -34,6 +35,7 @@ model Audit {
   geography     String?
   stage         String?
   founderName   String?
+  contactEmail  String?
   reportLanguage String      @default("Simple English")
   assumptions   String
   report        String

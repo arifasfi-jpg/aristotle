@@ -38,11 +38,21 @@ export default async function AuditPage({params}:{params:Promise<{id:string}>}){
    keyCostDrivers:arr(rawBM.keyCostDrivers,base.businessModel.keyCostDrivers),
   },
   marketView:{...base.marketView,...obj(raw.marketView)},
-  // Guard each unitEconomics row's numeric fields so Math.round() never receives a non-number
+  // Guard each unitEconomics row's numeric fields and the new assumption field
   unitEconomics:arr(raw.unitEconomics,base.unitEconomics).map((x,i)=>{
    const b=base.unitEconomics[i]??base.unitEconomics[0];
-   return{...x,conservative:num(x.conservative,b.conservative),base:num(x.base,b.base),upside:num(x.upside,b.upside)};
+   return{
+    ...x,
+    conservative:num(x.conservative,b.conservative),
+    base:num(x.base,b.base),
+    upside:num(x.upside,b.upside),
+    commentary:typeof x.commentary==='string'?x.commentary:b.commentary,
+    // assumption is new — old stored reports won't have it; fall back gracefully
+    assumption:typeof x.assumption==='string'?x.assumption:'NOT VERIFIED: Assumption not provided in this stored report.',
+   };
   }),
+  // experiments is new — old stored reports won't have it; fall back to deterministic
+  experiments:arr(raw.experiments,base.experiments),
   operatingModel:arr(raw.operatingModel,base.operatingModel),
   technologyBuild:{
    ...base.technologyBuild,...rawTB,
@@ -81,7 +91,7 @@ export default async function AuditPage({params}:{params:Promise<{id:string}>}){
   <Section title="1. Customer & problem"><div className="grid gap-4 md:grid-cols-3"><Mini title="Ideal customer" text={r.customer.icp}/><Mini title="Problem to prove" text={r.customer.problem}/><Mini title="Willingness to pay" text={r.customer.willingnessToPay}/></div></Section>
   <Section title="2. Business model & market"><div className="grid gap-4 md:grid-cols-2"><Mini title="Revenue model" text={r.businessModel.revenueModel}/><Mini title="Pricing logic" text={r.businessModel.pricingLogic}/><Mini title="Market view" text={r.marketView.marketType}/><Mini title="Competition" text={r.marketView.competition}/></div><div className="mt-4 rounded-2xl border border-[#202938] bg-[#0a0f16] p-5"><div className="text-xs uppercase tracking-wider text-[#718096]">Key cost drivers</div><ul className="mt-3 grid gap-2 md:grid-cols-2">{r.businessModel.keyCostDrivers.map(x=><li key={x} className="flex gap-2 text-sm text-[#c0c8d5]"><CheckCircle2 size={15} className="mt-0.5 shrink-0 text-[#77e2c1]"/>{x}</li>)}</ul></div></Section>
 
-  <Section title="3. Unit economics"><p className="mb-5 text-sm text-[#7f8da3]">These are scenario estimates. Replace them with real pilot data before making a scale decision.</p><div className="overflow-x-auto"><table className="w-full text-sm"><thead className="text-left text-[#718096]"><tr><th className="pb-3">Metric</th><th className="pb-3">Conservative</th><th className="pb-3">Base</th><th className="pb-3">Upside</th><th className="pb-3">Read this as</th></tr></thead><tbody>{r.unitEconomics.map(x=><tr key={x.metric} className="border-t border-[#202938]"><td className="py-4 pr-4 font-medium">{x.metric}<div className="text-xs font-normal text-[#536176]">{x.unit}</div></td><td className="py-4">{money(x.conservative)}</td><td className="py-4">{money(x.base)}</td><td className="py-4">{money(x.upside)}</td><td className="max-w-sm py-4 text-xs leading-5 text-[#8e9bae]">{x.commentary}</td></tr>)}</tbody></table></div></Section>
+  <Section title="3. Unit economics"><p className="mb-5 text-sm text-[#7f8da3]">These are scenario estimates. Replace them with real pilot data before making a scale decision.</p><div className="overflow-x-auto"><table className="w-full text-sm"><thead className="text-left text-[#718096]"><tr><th className="pb-3">Metric</th><th className="pb-3">Conservative</th><th className="pb-3">Base</th><th className="pb-3">Upside</th><th className="pb-3">Read this as</th></tr></thead><tbody>{r.unitEconomics.map(x=><tr key={x.metric} className="border-t border-[#202938]"><td className="py-4 pr-4 font-medium">{x.metric}<div className="text-xs font-normal text-[#536176]">{x.unit}</div></td><td className="py-4">{money(x.conservative)}</td><td className="py-4">{money(x.base)}</td><td className="py-4">{money(x.upside)}</td><td className="max-w-sm py-4 text-xs leading-5 text-[#8e9bae]">{x.commentary}{x.assumption&&<div className="mt-1 text-[#536176]">{x.assumption}</div>}</td></tr>)}</tbody></table></div></Section>
 
   <Section title="4. How to build it"><div className="grid gap-4 md:grid-cols-3"><Mini title="MVP — build first" items={r.technologyBuild.mvp}/><Mini title="Do not build yet" items={r.technologyBuild.avoidBuilding}/><Mini title="Operating model" items={r.operatingModel}/></div><div className="mt-4 rounded-2xl border border-[#202938] bg-[#0a0f16] p-5"><div className="text-xs uppercase tracking-wider text-[#718096]">Build principle</div><p className="mt-2 text-sm leading-6 text-[#c0c8d5]">{r.technologyBuild.estimatedBuildApproach}</p></div></Section>
 
@@ -94,6 +104,8 @@ export default async function AuditPage({params}:{params:Promise<{id:string}>}){
   <Section title="8. The first 30 days"><div className="grid gap-3 md:grid-cols-4">{r.thirtyDayPlan.map(x=><div key={x.week} className="rounded-2xl border border-[#202938] bg-[#0a0f16] p-5"><div className="text-xs font-semibold uppercase tracking-wider text-[#77e2c1]">{x.week}</div><h3 className="mt-3 font-medium">{x.objective}</h3><ul className="mt-4 space-y-2 text-sm leading-5 text-[#9aa7ba]">{x.actions.map(a=><li key={a}>• {a}</li>)}</ul><div className="mt-5 border-t border-[#202938] pt-3 text-xs leading-5 text-[#c0c8d5]"><strong>Success:</strong> {x.successMetric}</div></div>)}</div></Section>
 
   <div className="mt-4 grid gap-4 md:grid-cols-2"><Section title="Scale when"><ul className="space-y-3">{r.killOrScale.scaleWhen.map(x=><li key={x} className="flex gap-2 text-sm leading-6 text-[#c0c8d5]"><CheckCircle2 size={16} className="mt-1 shrink-0 text-[#77e2c1]"/>{x}</li>)}</ul></Section><Section title="Pause / rethink when"><ul className="space-y-3">{r.killOrScale.pauseWhen.map(x=><li key={x} className="flex gap-2 text-sm leading-6 text-[#c0c8d5]"><TriangleAlert size={16} className="mt-1 shrink-0 text-[#ffcf70]"/>{x}</li>)}</ul></Section></div>
+
+  <Section title="9. Experiments to run"><p className="mb-5 text-sm text-[#7f8da3]">Low-cost tests to validate the most important assumptions before committing to heavy investment.</p><div className="space-y-4">{r.experiments.map((x,i)=><div key={x.hypothesis} className="rounded-2xl border border-[#202938] bg-[#0a0f16] p-5"><div className="flex items-center gap-2 mb-3"><Target size={15} className="shrink-0 text-[#77e2c1]"/><span className="text-xs font-semibold uppercase tracking-wider text-[#77e2c1]">Experiment {i+1}</span></div><div className="grid gap-3 md:grid-cols-[1fr_1fr]"><div><div className="text-xs uppercase tracking-wider text-[#718096] mb-1">Hypothesis</div><p className="text-sm leading-6 text-[#c0c8d5]">{x.hypothesis}</p></div><div><div className="text-xs uppercase tracking-wider text-[#718096] mb-1">Test</div><p className="text-sm leading-6 text-[#c0c8d5]">{x.test}</p></div><div><div className="text-xs uppercase tracking-wider text-[#718096] mb-1">Metric</div><p className="text-sm leading-6 text-[#c0c8d5]">{x.metric}</p></div><div className="grid grid-cols-2 gap-3"><div><div className="text-xs uppercase tracking-wider text-[#4caf7d] mb-1">Pass</div><p className="text-sm leading-6 text-[#c0c8d5]">{x.passThreshold}</p></div><div><div className="text-xs uppercase tracking-wider text-[#ffcf70] mb-1">Fail</div><p className="text-sm leading-6 text-[#c0c8d5]">{x.failThreshold}</p></div></div></div></div>)}</div></Section>
 
   <div className="mt-4 grid gap-4 md:grid-cols-2"><Section title="Immediate next steps"><ul className="space-y-3">{r.nextSteps.map(x=><li key={x} className="flex gap-2 text-sm leading-6 text-[#c0c8d5]"><CheckCircle2 size={16} className="mt-1 shrink-0 text-[#77e2c1]"/>{x}</li>)}</ul></Section><Section title="Assumptions"><ul className="space-y-3">{r.assumptions.map(x=><li key={x} className="text-sm leading-6 text-[#8e9bae]">• {x}</li>)}</ul></Section></div>
 

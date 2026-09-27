@@ -12,7 +12,8 @@ export type AuditReport = {
   customer: { icp: string; problem: string; willingnessToPay: string };
   businessModel: { revenueModel: string; pricingLogic: string; keyCostDrivers: string[] };
   marketView: { marketType: string; demandSignal: string; competition: string; marketRisk: string };
-  unitEconomics: { metric: string; conservative: number; base: number; upside: number; unit: string; commentary?: string }[];
+  unitEconomics: { metric: string; conservative: number; base: number; upside: number; unit: string; commentary: string; assumption: string }[];
+  experiments: { hypothesis: string; test: string; metric: string; passThreshold: string; failThreshold: string }[];
   operatingModel: string[];
   technologyBuild: { mvp: string[]; avoidBuilding: string[]; estimatedBuildApproach: string };
   regulatory: { name: string; status: 'Likely' | 'Conditional' | 'Low signal'; rationale: string; action: string; source: string }[];
@@ -53,10 +54,10 @@ export function deterministicAudit(input: { idea: string; sector: Sector; stage?
   ];
 
   const unitEconomics = [
-    { metric: 'Revenue / unit', conservative: Math.round(price*.8), base: price, upside: Math.round(price*1.25), unit, commentary: simple ? 'Real customer pricing se replace karein.' : 'Replace with observed customer pricing.' },
-    { metric: 'Gross contribution', conservative: Math.round(contribution*.7), base: contribution, upside: Math.round(contribution*1.2), unit, commentary: simple ? 'Direct delivery/service/product cost minus revenue.' : 'Revenue less direct variable cost.' },
-    { metric: 'Acquisition cost', conservative: Math.round(cac*1.3), base: cac, upside: Math.round(cac*.75), unit: '₹ / acquired customer', commentary: 'Illustrative CAC; validate through a paid acquisition or sales pilot.' },
-    { metric: 'Contribution after CAC', conservative: Math.round(contribution*.7-cac*1.3), base: contribution-cac, upside: Math.round(contribution*1.2-cac*.75), unit: '₹ / acquired customer', commentary: 'Positive is necessary but not sufficient; payback period also matters.' }
+    { metric: 'Revenue / unit', conservative: Math.round(price*.8), base: price, upside: Math.round(price*1.25), unit, commentary: simple ? 'Real customer pricing se replace karein.' : 'Replace with observed customer pricing.', assumption: 'ASSUMPTION: Sector-default price used. Replace with founder-stated pricing.' },
+    { metric: 'Gross contribution', conservative: Math.round(contribution*.7), base: contribution, upside: Math.round(contribution*1.2), unit, commentary: simple ? 'Direct delivery/service/product cost minus revenue.' : 'Revenue less direct variable cost.', assumption: `ASSUMPTION: Gross margin estimated at ${Math.round(grossMargin*100)}% based on sector default. Replace with actual cost data.` },
+    { metric: 'Acquisition cost', conservative: Math.round(cac*1.3), base: cac, upside: Math.round(cac*.75), unit: '₹ / acquired customer', commentary: 'Illustrative CAC; validate through a paid acquisition or sales pilot.', assumption: 'ASSUMPTION: Sector-default CAC estimate. Not verified. Measure from first 5 customers.' },
+    { metric: 'Contribution after CAC', conservative: Math.round(contribution*.7-cac*1.3), base: contribution-cac, upside: Math.round(contribution*1.2-cac*.75), unit: '₹ / acquired customer', commentary: 'Positive is necessary but not sufficient; payback period also matters.', assumption: 'ASSUMPTION: Derived from above estimates. Replace both inputs with pilot data before using this figure.' }
   ];
 
   const vulnerabilities = [
@@ -65,6 +66,45 @@ export function deterministicAudit(input: { idea: string; sector: Sector; stage?
     { risk: 'Regulatory interpretation', probability: money || bis ? 'High' as const : 'Medium' as const, impact: 'High' as const, whyItMatters: simple ? 'Wrong structure se launch delay ya compliance cost aa sakti hai.' : 'Incorrect assumptions can create launch delays or compliance cost.', mitigation: simple ? 'Exact activity map karke specialist CA/lawyer/compliance advisor se validate karein.' : 'Map the exact activity and validate with a relevant professional before launch.' },
     { risk: 'Execution bandwidth', probability: 'High' as const, impact: 'Medium' as const, whyItMatters: simple ? 'Too many features se founder ka focus toot sakta hai.' : 'Too many features can dilute founder focus.', mitigation: simple ? 'One ICP, one wedge, one core workflow aur one 30-day metric rakhein.' : 'Choose one ICP, one wedge, one core workflow and one 30-day metric.' },
     { risk: 'Platform / channel dependency', probability: data ? 'Medium' as const : 'Low' as const, impact: 'Medium' as const, whyItMatters: simple ? 'WhatsApp, marketplaces ya APIs ke rules badal sakte hain.' : 'Third-party platform or API changes can affect distribution or operations.', mitigation: simple ? 'Data, source code aur customer relationship portable rakhein; single-channel dependency avoid karein.' : 'Keep code, data and customer relationships portable; avoid single-channel dependency.' }
+  ];
+
+  // 5 generic fallback experiments — sector-agnostic, applicable to any business idea
+  const experiments = [
+    {
+      hypothesis: 'The target customer has a painful enough problem that they will pay for a solution before it is fully built.',
+      test: 'Describe the proposed solution to 10 target customers and ask for a deposit or signed commitment — not just interest.',
+      metric: 'Number of customers who pay a deposit or sign a commitment letter out of 10 approached.',
+      passThreshold: '3 or more customers pay or commit within 2 weeks.',
+      failThreshold: 'Fewer than 2 customers are willing to pay or commit after 10 conversations.',
+    },
+    {
+      hypothesis: 'The proposed price is within the range the target customer considers acceptable given their current alternatives.',
+      test: 'Present the price explicitly in 10 sales conversations. Record objections, counter-offers and drop-offs.',
+      metric: 'Percentage of conversations where price is not raised as a blocking objection.',
+      passThreshold: '60% or more of conversations proceed past the price disclosure without a blocking objection.',
+      failThreshold: 'More than 50% of conversations stall or end when the price is stated.',
+    },
+    {
+      hypothesis: 'The core workflow can be delivered manually at acceptable quality before any software is built.',
+      test: 'Run a concierge pilot: deliver the core outcome manually for 3–5 paying customers using existing tools (spreadsheets, WhatsApp, phone).',
+      metric: 'Customer satisfaction score and repeat usage rate after the manual pilot.',
+      passThreshold: 'At least 3 of 5 pilot customers say they would use the service again and rate it 7/10 or higher.',
+      failThreshold: 'Fewer than 2 customers would repeat or satisfaction is below 5/10 on average.',
+    },
+    {
+      hypothesis: 'The unit economics are viable: gross contribution per customer exceeds variable cost at the stated price.',
+      test: 'Track actual revenue, direct variable cost (delivery, fulfilment, messaging, support time) and acquisition cost for the first 5 customers.',
+      metric: 'Gross contribution per customer after direct variable costs.',
+      passThreshold: 'Gross contribution is positive for at least 4 of 5 customers; CAC payback is under 6 months at base case.',
+      failThreshold: 'Gross contribution is negative for 2 or more customers, or CAC payback exceeds 12 months.',
+    },
+    {
+      hypothesis: 'At least one repeatable customer acquisition channel exists that does not rely solely on the founder\'s personal network.',
+      test: 'Run one outbound acquisition experiment (cold outreach, a paid ad, a referral programme, or a partner channel) targeting 20 prospects outside the founder\'s existing contacts.',
+      metric: 'Conversion rate from cold prospect to paying customer through the tested channel.',
+      passThreshold: 'At least 2 of 20 cold prospects convert to paying customers within 30 days.',
+      failThreshold: 'Zero conversions from 20 cold prospects after 30 days of consistent effort.',
+    },
   ];
 
   return {
@@ -103,6 +143,7 @@ export function deterministicAudit(input: { idea: string; sector: Sector; stage?
       marketRisk: simple ? 'Top-down TAM se zyada important hai first 100 customers ka reachable market.' : 'Reachable demand among the first 100 customers matters more than a large top-down TAM.'
     },
     unitEconomics,
+    experiments,
     operatingModel: [
       simple ? 'Founder-led sales and customer discovery first.' : 'Founder-led sales and customer discovery first.',
       simple ? 'Manual/concierge workflow se repeatability prove karein.' : 'Use a manual or concierge workflow before automating the full process.',

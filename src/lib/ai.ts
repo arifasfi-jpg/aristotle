@@ -66,8 +66,9 @@ function cleanJson(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Gemini responseSchema — mirrors AuditReport exactly so field names and
-// types are enforced by the model, not inferred from a free-text prompt.
+// Gemini responseSchema — mirrors AuditReport exactly.
+// unitEconomics now requires commentary + assumption.
+// experiments is a new required top-level array of exactly 5 items.
 // ---------------------------------------------------------------------------
 const AUDIT_RESPONSE_SCHEMA = {
   type: 'object',
@@ -118,8 +119,23 @@ const AUDIT_RESPONSE_SCHEMA = {
           upside: { type: 'number' },
           unit: { type: 'string' },
           commentary: { type: 'string' },
+          assumption: { type: 'string' },
         },
-        required: ['metric', 'conservative', 'base', 'upside', 'unit', 'commentary'],
+        required: ['metric', 'conservative', 'base', 'upside', 'unit', 'commentary', 'assumption'],
+      },
+    },
+    experiments: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          hypothesis: { type: 'string' },
+          test: { type: 'string' },
+          metric: { type: 'string' },
+          passThreshold: { type: 'string' },
+          failThreshold: { type: 'string' },
+        },
+        required: ['hypothesis', 'test', 'metric', 'passThreshold', 'failThreshold'],
       },
     },
     operatingModel: { type: 'array', items: { type: 'string' } },
@@ -188,8 +204,8 @@ const AUDIT_RESPONSE_SCHEMA = {
   required: [
     'executiveSummary', 'score', 'verdict', 'oneLineVerdict', 'whatThisBusinessIs',
     'whyItCouldWork', 'whatMustBeTrue', 'customer', 'businessModel', 'marketView',
-    'unitEconomics', 'operatingModel', 'technologyBuild', 'regulatory', 'vulnerabilities',
-    'goToMarket', 'thirtyDayPlan', 'killOrScale', 'assumptions', 'nextSteps',
+    'unitEconomics', 'experiments', 'operatingModel', 'technologyBuild', 'regulatory',
+    'vulnerabilities', 'goToMarket', 'thirtyDayPlan', 'killOrScale', 'assumptions', 'nextSteps',
   ],
 };
 
@@ -215,19 +231,19 @@ Do not add fields. Do not rename fields. Do not use numbered sections as a JSON 
 Do not return markdown, code fences, or any text outside the JSON object.
 Exact field names required: executiveSummary, score, verdict, oneLineVerdict,
 whatThisBusinessIs, whyItCouldWork, whatMustBeTrue, customer, businessModel,
-marketView, unitEconomics, operatingModel, technologyBuild, regulatory,
+marketView, unitEconomics, experiments, operatingModel, technologyBuild, regulatory,
 vulnerabilities, goToMarket, thirtyDayPlan, killOrScale, assumptions, nextSteps.
 
 Before returning JSON, verify internally:
 1. Did I use every founder-provided commercial number exactly?
 2. Did I label assumptions as ASSUMPTION and facts as FACT?
 3. Are all unit-economics values finite numbers with correct units?
-4. Does competition explain alternatives, not just list names?
-5. Is regulation specific to the actual operating model — not a generic checklist?
-6. Are vulnerabilities specific to this business?
-7. Are scale/pause conditions measurable, not vague?
-8. Did I avoid generic consulting filler?
-9. Does every section answer "why does THIS business have this conclusion"?
+4. Does every unitEconomics row have both commentary and assumption fields populated?
+5. Does competition explain alternatives, not just list names?
+6. Is regulation specific to the actual operating model — not a generic checklist?
+7. Are vulnerabilities specific to this business?
+8. Are scale/pause conditions measurable, not vague?
+9. Did I produce exactly 5 experiments, each specific to this business?
 10. Would this memo help the founder decide what to do in the next 7 days?
 
 ════════════════════════════════════════════════════════════════════════
@@ -295,144 +311,148 @@ whyItCouldWork (3–5 strings)
 whatMustBeTrue (4–6 strings)
   Falsifiable, specific assumptions. Each must be testable within 60 days.
   FORBIDDEN: "Customers must want the product." / "Pricing must be right."
-  GOOD: "Independent pharmacies in Tier-2 cities must be willing to pay ₹1,499/month
-        before seeing measurable revenue uplift — not just after pilot."
 
 customer.icp
   Name: segment, role, geography, size, digital literacy, current tooling.
   Distinguish: who pays vs. who uses vs. who can block adoption.
 
 customer.problem
-  Describe: current workflow, existing workaround, frequency, economic cost of the problem,
-  and what the customer currently does about it.
+  Describe: current workflow, existing workaround, frequency, economic cost of the problem.
   Use FACT / ASSUMPTION / HYPOTHESIS labels.
-  FORBIDDEN: inventing customer research that was not in the founder's idea.
+  FORBIDDEN: inventing customer research not in the founder's idea.
 
 customer.willingnessToPay
-  What evidence or proxy exists that this customer would pay this price?
-  If founder provided pricing, analyse whether it is above or below the customer's
-  cost of their current workaround. If no evidence exists, state: HYPOTHESIS — unverified.
+  What evidence or proxy exists? If no evidence, state: HYPOTHESIS — unverified.
 
 businessModel.revenueModel
-  Reconstruct exact money flow: who pays, what they pay, when, how much Aristotle keeps,
-  what costs increase with volume.
-  Use founder-provided pricing. If unclear, state the ambiguity.
+  Reconstruct exact money flow using founder-provided pricing. If unclear, state the ambiguity.
 
 businessModel.pricingLogic
-  Analyse the logic behind the pricing — is it cost-plus, value-based, competitive, or arbitrary?
-  If founder gave numbers, use them. If not, propose and label as ASSUMPTION.
+  Analyse the pricing logic. If founder gave numbers, use them. If not, label as ASSUMPTION.
 
 businessModel.keyCostDrivers (4–6 strings)
-  Costs specific to this operating model. Be concrete: not "marketing" but
-  "outbound sales rep cost per pharmacy acquired" or "WhatsApp Business API per message."
+  Specific costs for this operating model. Not "marketing" — name the actual cost item.
 
 marketView.marketType
-  Describe the category dynamics specific to this business, not just the sector name.
+  Category dynamics specific to this business, not just the sector name.
 
 marketView.demandSignal
-  What proxies for demand exist? Be honest. State VERIFIED or INFERENCE.
+  Proxies for demand. State VERIFIED or INFERENCE honestly.
 
 marketView.competition
-  Map what the customer can use TODAY — do not just list competitor names.
-  For each alternative: what they get, what it costs, its weakness, its advantage over this idea.
-  Include: (1) do nothing, (2) existing manual/phone/WhatsApp workflow,
-  (3) existing software they may already use, (4) funded competitors if research supports them.
-  Mark every unverified competitor claim as (INFERENCE).
+  Map what the customer can use TODAY. For each alternative: what they get, cost, weakness,
+  advantage over this idea. Include do-nothing, manual workflow, existing software, funded rivals.
+  Mark every unverified claim as (INFERENCE).
 
 marketView.marketRisk
-  One sentence: the single biggest market-level risk specific to this idea and operating model.
+  Single biggest market-level risk for this specific idea and operating model.
 
-unitEconomics (3–6 rows)
+unitEconomics (3–8 rows)
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   CRITICAL RULES:
   • Build from the actual pricing and model described by the founder.
   • If pricing is given (e.g. ₹1,499/month + ₹5/order), model BOTH revenue streams.
   • Never substitute generic sector averages for founder-provided numbers.
   • All three scenario values (conservative, base, upside) must be finite numbers.
-  • Units must be meaningful: ₹, orders, months, %, customers — never mix units within a row.
   • Conservative < Base < Upside for revenue rows; Upside < Base < Conservative for cost rows.
-  • Each commentary must explain the specific assumption behind the numbers.
+  • Units must be correct and specific: ₹/pharmacy/month, orders/pharmacy/month, ₹/order, months.
+    Never put a currency symbol before a count (e.g. "300 orders" not "₹300 orders").
+  • Every row MUST have both fields populated:
+    - commentary: explain what this row measures and how the numbers were derived.
+    - assumption: start with one of FOUNDER-STATED / ASSUMPTION / INFERENCE / NOT VERIFIED,
+      then state the specific basis. Examples:
+        FOUNDER-STATED: ₹1,499 monthly subscription as specified by founder.
+        FOUNDER-STATED: ₹5 fee per successfully completed order.
+        ASSUMPTION: 300 orders per pharmacy per month; requires pilot validation.
+        NOT VERIFIED: WhatsApp API cost — depends on final messaging architecture.
+  • Do not invent precise variable costs without labelling them NOT VERIFIED.
+  • If contribution margin cannot be reliably calculated, say so explicitly in commentary.
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   Suggested structure for subscription + per-transaction model:
     Row 1: Monthly subscription revenue per active customer (unit: ₹/customer/month)
     Row 2: Orders processed per active customer per month (unit: orders/customer/month)
     Row 3: Per-order platform revenue (unit: ₹/order)
-    Row 4: Total platform revenue per customer per month = row1 + (row2 × row3) (unit: ₹/customer/month)
+    Row 4: Total platform revenue per customer per month (unit: ₹/customer/month)
     Row 5: Estimated variable cost per customer per month (unit: ₹/customer/month)
-    Row 6: Gross contribution per customer per month = row4 - row5 (unit: ₹/customer/month)
-    Row 7: Customer acquisition cost (unit: ₹/customer acquired)
-    Row 8: CAC payback = row7 / row6 (unit: months)
-  Adjust rows to fit the actual model. For pure subscription, omit per-order rows.
-  For marketplace/commission model, use GMV and take-rate rows instead.
-  Label every estimate that is not from the founder's input as (ASSUMPTION).
+    Row 6: Gross contribution per customer per month (unit: ₹/customer/month)
+    Row 7: Customer acquisition cost (unit: ₹/customer)
+    Row 8: CAC payback (unit: months)
+  Adapt rows to fit the actual model.
+
+experiments (EXACTLY 5 objects)
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Produce EXACTLY 5 experiments. Not 4, not 6 — exactly 5.
+  Each experiment must test one specific assumption of THIS business.
+  Do NOT produce generic experiments applicable to any startup.
+  Each experiment must be executable by the founder within 30 days at low cost.
+  Each experiment must have a measurable, unambiguous pass and fail threshold.
+
+  Required fields for each experiment:
+  hypothesis:     The specific assumption being tested. Name the business, the customer,
+                  the price or behaviour being tested. Not generic.
+  test:           Exactly what the founder should do. Name the channel, the number of
+                  prospects, the ask, and the timeframe.
+  metric:         The single number or observation that determines the result.
+  passThreshold:  A specific, measurable result that confirms the hypothesis.
+  failThreshold:  A specific, measurable result that refutes the hypothesis.
+
+  FORBIDDEN experiment types (too generic):
+  - "Test if customers want this product" (not specific to this business)
+  - "Validate the business model" (not a test)
+  - "Check if technology works" (not a customer experiment)
+
+  GOOD experiment examples (specific to a pharmacy platform):
+  hypothesis: "Independent pharmacy owners in Tier-2 cities will pay ₹1,499/month before
+              seeing measurable revenue uplift, based on time-saving alone."
+  test: "Approach 15 independent pharmacies in one city. Present the product demo and
+        ask for an upfront 3-month commitment at ₹1,499/month."
+  metric: "Number of pharmacies that pay or sign a commitment letter out of 15 approached."
+  passThreshold: "5 or more pharmacies commit or pay within 3 weeks."
+  failThreshold: "Fewer than 3 pharmacies commit after 15 conversations."
+  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 operatingModel (3–5 strings)
-  Describe how this specific business operates day-to-day.
-  Who onboards customers? Who handles support? Who manages the transaction?
-  What is manual vs. automated? What scales with headcount vs. software?
+  How this specific business runs day-to-day. Specific roles, manual vs automated steps.
 
 technologyBuild.mvp (4–6 strings)
-  Specific features to build first that directly test the business hypothesis.
-  Prefer manual/concierge validation over engineering where possible.
+  Specific features that test the business hypothesis. Prefer manual validation first.
 
 technologyBuild.avoidBuilding (3–5 strings)
-  Specific features NOT to build yet, with a reason tied to the business stage.
+  Features NOT to build yet, with a reason tied to the business stage.
 
 technologyBuild.estimatedBuildApproach
-  Concrete build path for this specific product. Name the core technical decision.
+  Concrete build path. Name the core technical decision for this product.
 
 regulatory
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  ONLY include regulations actually triggered by the operating model.
-  For each candidate rule, answer: "What specific activity in this business triggers this rule?"
-  If the answer is "none clearly," set status to "Low signal" or omit.
-  Do NOT include RBI/SEBI/IRDAI/lending/insurance rules unless the idea explicitly
-  involves financial services.
-  Do NOT add GST/MSME/DPDP/BIS as defaults — only include if materially relevant.
-  For each item: name, status ("Likely"|"Conditional"|"Low signal"), rationale explaining
-  the specific triggering activity, action the founder should take, source (real URL only —
-  if uncertain, use the regulator's homepage URL, not an invented deep link).
-  If something requires a lawyer to confirm, say: "Requires legal verification."
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ONLY include regulations triggered by the actual operating model.
+  For each: name, status ("Likely"|"Conditional"|"Low signal"), rationale (what activity triggers it),
+  action, source (real URL — use regulator homepage if uncertain).
+  Do NOT default-include GST/MSME/DPDP/BIS/RBI/SEBI/IRDAI.
+  Say "Requires legal verification." where needed.
 
 vulnerabilities (5–7 objects)
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Each risk must be specific to THIS business model.
-  For each: risk name, whyItMatters (tied to actual model), probability (Low/Medium/High),
-  impact (Low/Medium/High), mitigation (concrete, not generic).
-  Include at minimum: willingness-to-pay risk, unit-economics risk, one operational
-  risk specific to the model, one competitive/disintermediation risk.
-  FORBIDDEN: "Technology may not work." / "Market may not grow." (too generic)
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Each risk specific to THIS business. probability/impact: Low/Medium/High.
+  Include: willingness-to-pay risk, unit-economics risk, one operational risk,
+  one competitive/disintermediation risk.
 
 goToMarket (4–6 strings)
-  Operational, specific steps.
-  Name: first customer segment, geographic wedge if relevant, acquisition channel,
-  founder's first sales action, key objection to test, pilot structure.
-  FORBIDDEN: "Use social media." / "Build brand awareness."
+  Operational steps. Name segment, channel, first sales action, key objection, pilot structure.
 
-thirtyDayPlan (exactly 4 objects: Week 1, Week 2, Week 3, Week 4)
-  Each must have: week, objective, actions (array of 3–4 specific actions), successMetric.
-  successMetric must be a number or observable fact, not a vague statement.
-  Week 1–2: focus on customer validation, not technology.
-  Week 3–4: first paid pilot or commitment, initial economics measurement.
+thirtyDayPlan (exactly 4 objects: Week 1–4)
+  Each: week, objective, actions (3–4 specific), successMetric (a number or observable fact).
+  Weeks 1–2: customer validation. Weeks 3–4: paid pilot and economics measurement.
 
 killOrScale.scaleWhen (4–5 strings)
-  Each criterion must be measurable with a specific threshold.
-  FORBIDDEN: "When traction is good." / "When unit economics are positive."
-  GOOD: "≥5 pharmacies paying ₹1,499/month for ≥2 consecutive months without discount."
+  Measurable thresholds. Not vague.
 
 killOrScale.pauseWhen (4–5 strings)
-  Each must be a specific observable failure signal with a threshold.
+  Specific observable failure signals with thresholds.
 
 assumptions (5–7 strings)
-  List the most important assumptions underlying this analysis.
-  Rank by kill-potential: the assumption whose failure would end the business first, last.
-  Label each: UNVERIFIED ASSUMPTION / INFERENCE / FOUNDER-STATED.
+  Ranked by kill-potential. Label each: UNVERIFIED ASSUMPTION / INFERENCE / FOUNDER-STATED.
 
 nextSteps (5–7 strings)
-  Concrete actions the founder can take this week.
-  Each must be specific to this business: name the customer, the channel, the test.
+  Concrete this-week actions. Name the customer, channel, and test.
 
 ════════════════════════════════════════════════════════════════════════
 RESEARCH (use to improve market, competitor and regulatory sections)
@@ -447,8 +467,8 @@ EVIDENCE RULES
 - Use real regulator URLs only. If unsure, use the regulator homepage.
 - If research is thin, say so — do not fill gaps with invented facts.
 - Do not import financial-regulation sections unless the idea involves financial services.
-- Distinguish throughout: FACT (from founder input or verified source) vs.
-  ASSUMPTION (your estimate, labelled) vs. INFERENCE (from research, unverified).
+- Distinguish: FACT (founder input or verified source) / ASSUMPTION (your estimate, labelled) /
+  INFERENCE (from research, unverified).
 `;
 }
 
@@ -532,8 +552,6 @@ export async function runAudit(input: AuditInput) {
               ],
               generationConfig: {
                 responseMimeType: 'application/json',
-                // responseSchema enforces exact field names and types — this is the
-                // primary fix for generic/misnamed fields in the Gemini output.
                 responseSchema: AUDIT_RESPONSE_SCHEMA,
                 maxOutputTokens: 8192,
               },

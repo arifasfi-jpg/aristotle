@@ -113,18 +113,17 @@ describe('14. proposed pricing is never converted into revenue', () => {
   });
 });
 
-describe('Deterministic fallback', () => {
-  it('uses founder facts, never sector price/margin defaults, and passes validation unchanged', () => {
+describe('Report skeleton (never shown to a founder) has no sector defaults', () => {
+  it('contains only founder facts and calculations from them — no sector price, margin or CAC', () => {
     const r = deterministicAudit({ idea: 'x', sector: 'Quick Commerce', founderFacts: FACTS, scope: 'GROWTH_PLAN' });
-    expect(r.unitEconomics.some((x) => /Sector-default price|Gross margin estimated/.test(x.assumption))).toBe(false);
     const { report } = validateReport(r, FACTS);
     expect(vals(report.unitEconomics.find((x) => x.factId === id('unit_cost')))).toEqual([500, 500, 500]);
-    expect(report.unitEconomics.find((x) => x.concept === 'cac')!.provenance).toBe('ASSUMPTION');
+    expect(report.unitEconomics.every((x) => x.provenance === 'FOUNDER_STATED' || x.provenance === 'CALCULATED')).toBe(true);
+    expect(JSON.stringify(report.unitEconomics)).not.toMatch(/Sector-default|Gross margin estimated|Acquisition cost/);
   });
-  it('NEW_IDEA with no numbers: same rows as before, now tagged ASSUMPTION', () => {
+  it('with no founder numbers there are no numbers at all', () => {
     const r = deterministicAudit({ idea: 'I want to launch a pharmacy platform in Pune.', sector: 'Healthtech' });
-    expect(r.unitEconomics.map((x) => x.metric)).toEqual(['Revenue / unit', 'Gross contribution', 'Acquisition cost', 'Contribution after CAC']);
-    expect(r.unitEconomics.every((x) => x.provenance === 'ASSUMPTION')).toBe(true);
-    expect(validateReport(r, []).report.unitEconomics.map((x) => [x.metric, x.base])).toEqual(r.unitEconomics.map((x) => [x.metric, x.base]));
+    expect(r.unitEconomics).toEqual([]);
+    expect(validateReport(r, []).report.unitEconomics).toEqual([]);
   });
 });

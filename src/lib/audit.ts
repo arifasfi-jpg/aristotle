@@ -1,4 +1,4 @@
-import type { DecisionMemo, EvidenceClaim } from './evidence';
+import type { DecisionMemo, EvidenceClaim, UnknownMetric } from './evidence';
 import type { FactConcept, FounderFact } from './founder-facts';
 export type Sector = 'Quick Commerce' | 'D2C / Consumer' | 'B2B SaaS' | 'Digital Agency' | 'Fintech' | 'Healthtech' | 'Edtech' | 'Marketplace' | 'Manufacturing' | 'Other';
 export type ReportLanguage = 'Simple English' | 'Hinglish';
@@ -27,7 +27,8 @@ export type AuditReport = {
   experiments: { hypothesis: string; test: string; metric: string; passThreshold: string; failThreshold: string }[];
   operatingModel: string[];
   technologyBuild: { mvp: string[]; avoidBuilding: string[]; estimatedBuildApproach: string };
-  regulatory: { name: string; status: 'Likely' | 'Conditional' | 'Low signal'; rationale: string; action: string; source: string; trigger?: string }[];
+  regulatory: { name: string; status: 'Likely' | 'Conditional' | 'Low signal'; rationale: string; action: string; source: string; trigger?: string; activity?: string; requirement?: string; sourceIds?: string[] }[];
+  unknownEconomics?: UnknownMetric[];
   // Evidence layer (optional: older stored reports do not have these)
   decisionMemo?: DecisionMemo;
   evidence?: EvidenceClaim[];
@@ -41,6 +42,11 @@ export type AuditReport = {
 
 const isHinglish = (language: ReportLanguage) => language === 'Hinglish';
 
+/**
+ * Structural skeleton of a report (founder facts only, no invented numbers, no research).
+ * NEVER returned to a founder as an audit: the engine has no template path. Used as a test fixture and
+ * as the shape reference for report validation.
+ */
 export function deterministicAudit(input: { idea: string; sector: Sector; stage?: string; geography?: string; language?: ReportLanguage; scope?: string; founderFacts?: FounderFact[] }): AuditReport {
   const t = input.idea.toLowerCase();
   const lang = input.language || 'Simple English';
@@ -49,11 +55,6 @@ export function deterministicAudit(input: { idea: string; sector: Sector; stage?
   const money = input.sector === 'Fintech' || /(loan|lending|credit|wallet|payment|insurance|investment|nidhi|nbfc)/.test(t);
   const bis = input.sector === 'Manufacturing' || /(electronics|charger|toy|helmet|appliance|battery|steel|cement|device)/.test(t);
   const subscription = ['B2B SaaS','Digital Agency'].includes(input.sector);
-  const price = subscription ? (input.sector === 'B2B SaaS' ? 5000 : 15000) : input.sector === 'Quick Commerce' ? 450 : input.sector === 'Marketplace' ? 700 : 1200;
-  const grossMargin = input.sector === 'Quick Commerce' ? 0.18 : input.sector === 'Marketplace' ? 0.22 : input.sector === 'D2C / Consumer' ? 0.35 : subscription ? 0.70 : 0.55;
-  const cac = input.sector === 'Digital Agency' ? 15000 : input.sector === 'B2B SaaS' ? 12000 : input.sector === 'Quick Commerce' ? 180 : 350;
-  const unit = subscription ? '₹ / customer / month' : '₹ / transaction';
-  const contribution = Math.round(price * grossMargin);
   const score = Math.max(38, Math.min(86, 67 + (input.sector === 'B2B SaaS' ? 8 : 0) - (money ? 9 : 0) - (physical ? 4 : 0)));
 
   const simple = isHinglish(lang);
@@ -67,19 +68,10 @@ export function deterministicAudit(input: { idea: string; sector: Sector; stage?
     { name: 'Sector licensing', status: money ? 'Likely' as const : 'Conditional' as const, rationale: money ? 'Idea regulated financial activity ko touch karta hai.' : 'No specific sector licence is inferred from the intake alone.', action: money ? 'Exact regulated activity define karke RBI/IRDAI/SEBI or relevant framework validate karein.' : 'Confirm sector and state-specific rules before launch.', source: 'https://www.rbi.org.in/' }
   ];
 
-  const sectorUnitEconomics: UnitEconomicsRow[] = [
-    { concept: 'selling_price' as const, timeframe: 'ASSUMPTION' as const, provenance: 'ASSUMPTION' as const, metric: 'Revenue / unit', conservative: Math.round(price*.8), base: price, upside: Math.round(price*1.25), unit, commentary: simple ? 'Real customer pricing se replace karein.' : 'Replace with observed customer pricing.', assumption: 'ASSUMPTION: Sector-default price used. Replace with founder-stated pricing.' },
-    { concept: 'contribution' as const, timeframe: 'ASSUMPTION' as const, provenance: 'ASSUMPTION' as const, metric: 'Gross contribution', conservative: Math.round(contribution*.7), base: contribution, upside: Math.round(contribution*1.2), unit, commentary: simple ? 'Direct delivery/service/product cost minus revenue.' : 'Revenue less direct variable cost.', assumption: `ASSUMPTION: Gross margin estimated at ${Math.round(grossMargin*100)}% based on sector default. Replace with actual cost data.` },
-    { concept: 'cac' as const, timeframe: 'ASSUMPTION' as const, provenance: 'ASSUMPTION' as const, metric: 'Acquisition cost', conservative: Math.round(cac*1.3), base: cac, upside: Math.round(cac*.75), unit: '₹ / acquired customer', commentary: 'Illustrative CAC; validate through a paid acquisition or sales pilot.', assumption: 'ASSUMPTION: Sector-default CAC estimate. Not verified. Measure from first 5 customers.' },
-    { concept: 'contribution' as const, timeframe: 'ASSUMPTION' as const, provenance: 'ASSUMPTION' as const, metric: 'Contribution after CAC', conservative: Math.round(contribution*.7-cac*1.3), base: contribution-cac, upside: Math.round(contribution*1.2-cac*.75), unit: '₹ / acquired customer', commentary: 'Positive is necessary but not sufficient; payback period also matters.', assumption: 'ASSUMPTION: Derived from above estimates. Replace both inputs with pilot data before using this figure.' }
-  ];
-
-  // Founder facts replace sector defaults. If the founder stated price, cost or margin, the sector price and
-  // margin rows are dropped entirely; the CAC row stays as a labelled ASSUMPTION. Report validation then
-  // inserts every confirmed founder fact as a FOUNDER_STATED row.
   const facts = (input.founderFacts || []).filter((f) => f.locked && f.confirmedByFounder);
-  const pricingStated = facts.some((f) => ['selling_price', 'unit_cost', 'margin'].includes(f.concept));
-  const unitEconomics: UnitEconomicsRow[] = pricingStated ? sectorUnitEconomics.filter((r) => r.concept === 'cac') : sectorUnitEconomics;
+  // No sector defaults: numbers exist only if the founder stated them (rows inserted by report validation)
+  // or they are calculated from founder facts.
+  const unitEconomics: UnitEconomicsRow[] = [];
   const fPrice = facts.find((f) => f.concept === 'selling_price' && f.value !== undefined && f.timeframe !== 'TARGET');
   const fCost = facts.find((f) => f.concept === 'unit_cost' && f.value !== undefined && f.timeframe !== 'TARGET');
   if (fPrice && fCost && !fPrice.period && fPrice.unit === fCost.unit) {

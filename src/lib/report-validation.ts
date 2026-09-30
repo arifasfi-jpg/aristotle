@@ -33,6 +33,8 @@ const STATIC_CONCEPTS: FactConcept[] = ['unit_cost', 'selling_price', 'margin', 
 export function inferConcept(metric: string, unit: string): RowConcept {
   const m = metric.toLowerCase();
   const u = unit.toLowerCase();
+  // A difference between two figures (premium, gap, discount vs a competitor) is not itself a price or cost.
+  if (/premium|difference|\bgap\b|\bversus\b|\bvs\.?\s|discount (to|vs|versus|against)/.test(m)) return 'other';
   if (/acquisition|\bcac\b/.test(m)) return 'cac';
   if (/payback/.test(m)) return 'payback';
   if (/contribution/.test(m) && !/margin/.test(m)) return 'contribution';
@@ -171,7 +173,10 @@ export function validateReport(report: AuditReport, factsIn?: FounderFact[] | nu
     // 2b. Rows claiming to be founder data must match a real founder fact.
     const concept = row.concept as FactConcept;
     // A projection escapes the founder lock only if it is a traceable calculation or a labelled scenario with a basis.
-    const legitimateProjection = row.provenance === 'CALCULATED' || (['EXTERNAL', 'ASSUMPTION', 'HYPOTHESIS'].includes(row.provenance!) && (row.basis || '').trim().length >= 10);
+    // An EXTERNAL figure citing a verified research finding (R#) is a labelled benchmark even without free-text basis.
+    const researched = row.provenance === 'EXTERNAL' && (Array.isArray(row.inputs) ? row.inputs : []).some((x) => /^R\d+$/.test(String(x)));
+    const labelled = researched || (['EXTERNAL', 'ASSUMPTION', 'HYPOTHESIS'].includes(row.provenance!) && (row.basis || '').trim().length >= 10);
+    const legitimateProjection = row.provenance === 'CALCULATED' || labelled;
     const rowClass = cls(row.timeframe!) === 'projection' && (STATIC_CONCEPTS.includes(concept) || !legitimateProjection) ? 'now' : cls(row.timeframe!);
     let fact = row.factId ? byId.get(row.factId) : undefined;
     if (fact && (fact.concept !== concept && !(fact.concept === 'customers' && concept === 'volume'))) fact = undefined;
@@ -180,7 +185,7 @@ export function validateReport(report: AuditReport, factsIn?: FounderFact[] | nu
     if (fact && rowClass !== 'projection') {
       if (valuesMatch(row, fact)) {
         row = { ...row, provenance: 'FOUNDER_STATED', factId: fact.id, unit: row.unit || displayUnit(fact) };
-      } else if (['EXTERNAL', 'ASSUMPTION', 'HYPOTHESIS'].includes(row.provenance!) && (row.basis || '').trim().length >= 10) {
+      } else if (labelled) {
         // Allowed only as a clearly labelled alternative figure — never as founder data.
         const prefix = row.provenance === 'EXTERNAL' ? 'External benchmark: ' : 'Scenario: ';
         row = { ...row, metric: row.metric.startsWith(prefix) ? row.metric : `${prefix}${row.metric}`, differsFromFounder: true, factId: undefined };

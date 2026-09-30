@@ -33,7 +33,7 @@ describe('Evidence validation (server-side, citations are never trusted)', () =>
     const [sourced, invented, founder, fakeFounder] = report.evidence! as EvidenceClaim[];
     expect(sourced).toMatchObject({ type: 'FACT', sourceIds: ['S1'], verified: true });
     expect(invented).toMatchObject({ type: 'INFERENCE', confidence: 'LOW', sourceIds: [], verified: false });
-    expect(invented.note).toMatch(/No verifiable source/);
+    expect(invented.note).toMatch(/No verifiable research evidence/);
     expect(founder).toMatchObject({ type: 'FOUNDER', sourceIds: [FACTS[0].id] });
     expect(fakeFounder.type).toBe('ASSUMPTION');
     expect(log).toMatchObject({ droppedSourceIds: 2, downgradedFacts: 1 });
@@ -80,40 +80,12 @@ describe('Audit engine: a paying founder never receives a template', () => {
     await expect(runAudit({ idea: 'An AI WhatsApp platform for pharmacies', sector: 'Healthtech' })).rejects.toThrow(/AI_ENGINE_NOT_CONFIGURED/);
   });
 
-  it('Demo Mode template is honest: every critical assumption UNKNOWN, no default regulations', async () => {
+  it('Demo Mode does NOT bypass research: missing AI credentials fail (retryable) even in Demo Mode', async () => {
     delete process.env.GEMINI_API_KEY; delete process.env.TAVILY_API_KEY;
     process.env.DEMO_MODE = 'true'; process.env.VERCEL_ENV = 'preview';
-    const r = await runAudit({ idea: 'A consulting service for small agencies', sector: 'Digital Agency' });
-    expect(r.research).toBeNull();
-    expect(r.report.decisionMemo!.criticalAssumptions.every((a) => a.evidenceStatus === 'UNKNOWN')).toBe(true);
-    expect(r.report.regulatory.map((x) => x.name)).not.toContain('MSME / Udyam');
-    expect(r.report.regulatory.every((x) => (x.trigger || '').length > 0)).toBe(true);
+    await expect(runAudit({ idea: 'A consulting service for small agencies', sector: 'Digital Agency' })).rejects.toThrow(/AI_ENGINE_NOT_CONFIGURED/);
+    process.env.TAVILY_API_KEY = 't';
+    await expect(runAudit({ idea: 'A consulting service for small agencies', sector: 'Digital Agency' })).rejects.toThrow(/AI_ENGINE_NOT_CONFIGURED/);
   });
 
-  it('full pipeline: Tavily sources get ids, Gemini citations are verified, fabricated ones removed', async () => {
-    process.env.GEMINI_API_KEY = 'g'; process.env.TAVILY_API_KEY = 't'; delete process.env.DEMO_MODE;
-    const gemReport = {
-      ...deterministicAudit({ idea: 'x', sector: 'Healthtech' }),
-      decisionMemo: { decisionQuestion: 'Build it?', criticalAssumptions: [
-        { assumption: 'Pharmacies pay ₹1,499', whyItMatters: 'price', evidenceStatus: 'SUPPORTED', evidence: 'Similar tools', evidenceIds: ['S1'], cheapestTest: 'Pre-sell', experimentIndex: 1 },
-        { assumption: 'Huge market', whyItMatters: 'size', evidenceStatus: 'SUPPORTED', evidence: 'A famous report', evidenceIds: ['S42'], cheapestTest: 'n/a', experimentIndex: 2 },
-        { assumption: 'Repeat buying', whyItMatters: 'retention', evidenceStatus: 'UNKNOWN', evidence: 'None', evidenceIds: [], cheapestTest: 'Pilot', experimentIndex: 3 },
-      ], proceedIf: ['x'], changeModelIf: ['y'], evidenceStillRequired: ['z'] },
-      evidence: [{ claim: 'Market is ₹5,000 crore', type: 'FACT', sourceIds: ['S42'], confidence: 'HIGH', validation: '' }],
-    };
-    const fetchSpy = vi.fn(async (url: string, _init?: RequestInit) => {
-      if (url.includes('tavily')) return new Response(JSON.stringify({ results: [{ title: 'Pricing', url: 'https://example.org/p', content: 'c' }] }), { status: 200 });
-      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(gemReport) }] } }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 20 } }), { status: 200 });
-    });
-    vi.stubGlobal('fetch', fetchSpy);
-    const r = await runAudit({ idea: 'An AI WhatsApp platform for pharmacies', sector: 'Healthtech' });
-    expect(r.research!.sources.map((s) => s.id)).toEqual(['S1']);
-    const prompt = JSON.parse((fetchSpy.mock.calls.find((c) => String(c[0]).includes('generativelanguage'))![1]!).body as string).contents[0].parts[0].text as string;
-    expect(prompt).toContain('[S1] TITLE: Pricing');
-    expect(prompt).toContain('EVIDENCE DISCIPLINE');
-    const [a, b] = r.report.decisionMemo!.criticalAssumptions;
-    expect(a.evidenceStatus).toBe('SUPPORTED');
-    expect(b.evidenceStatus).toBe('UNKNOWN');
-    expect(r.report.evidence![0]).toMatchObject({ type: 'INFERENCE', confidence: 'LOW', sourceIds: [] });
-  });
 });

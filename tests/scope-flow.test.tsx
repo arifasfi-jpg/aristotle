@@ -369,6 +369,33 @@ describe('Evidence layer end to end', () => {
     expect(zip.file('project/research.json')).toBeTruthy();
   });
 
+  it('research-first report: shows what was researched and never back-fills missing sections from a template', async () => {
+    const id = await newAudit('An AI-powered platform that helps Indian small businesses manage their GST compliance.');
+    const research = {
+      version: 2, generatedAt: new Date().toISOString(), queries: ['gst software pricing india'],
+      businessModel: { summary: 'Subscription GST filing software for MSMEs', customer: 'MSME owners', payer: 'Owner', offering: 'GST filing', revenueMechanism: 'Subscription', keyActivities: [], regulatedActivities: [] },
+      sources: [{ id: 'S1', title: 'Zoho Books pricing', url: 'https://example.org/zoho', snippet: '₹749/month', query: 'gst software pricing india', retrievedAt: '', questionId: 'Q1' }],
+      questions: [
+        { id: 'Q1', category: 'ALTERNATIVES_PRICING', question: 'What do GST tools charge?', whyItMatters: 'Price ceiling', query: 'gst software pricing india', status: 'ANSWERED', sourceIds: ['S1'], findingIds: ['R1'] },
+        { id: 'Q2', category: 'CHANNEL', question: 'Do CAs choose the software?', whyItMatters: 'Channel', query: 'ca choose gst software', status: 'NOT_FOUND', sourceIds: [], findingIds: [] },
+      ],
+      findings: [{ id: 'R1', questionId: 'Q1', statement: 'Zoho Books Standard costs ₹749/month.', sourceId: 'S1', quote: 'Standard plan costs ₹749', confidence: 'HIGH' }],
+    };
+    db.files.push({ auditId: id, path: 'research.json', content: JSON.stringify(research) });
+    Object.assign(db.audits.get(id)!, { paymentStatus: 'paid', status: 'completed', report: JSON.stringify({
+      score: 55, oneLineVerdict: 'Undercut ₹749 incumbents or sell through CAs.', unitEconomics: [{ metric: 'Gross margin', conservative: null, base: 'x', upside: 60, unit: '%' }],
+      unknownEconomics: [{ metric: 'Customer acquisition cost', whyUnknown: 'No research found', howToEstablish: 'Run a ₹5,000 ad test' }],
+    }) });
+    const html = await page(id);
+    expect(html).toContain('What Aristotle researched');
+    expect(html).toContain('Zoho Books Standard costs ₹749/month.');
+    expect(html).toContain('No evidence found');
+    expect(html).toContain('Not yet established');
+    expect(html).toContain('Customer acquisition cost');
+    expect(html).toContain('Not produced for this audit.');
+    expect(html).not.toMatch(/Sector-default|₹455|55%/);
+  });
+
   it('older reports without an evidence layer do not get a template decision memo', async () => {
     const id = await newAudit('I want to launch a pharmacy platform in Pune for chemists.');
     Object.assign(db.audits.get(id)!, { paymentStatus: 'paid', status: 'completed', report: JSON.stringify({ score: 70, oneLineVerdict: 'Old report' }) });

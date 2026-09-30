@@ -5,7 +5,7 @@ import { runAudit } from '@/lib/ai';
 import Razorpay from 'razorpay';
 import { isDemoMode, razorpayConfigured, verifyRazorpaySignature } from '@/lib/payments';
 import type { Scope } from '@/lib/routing';
-import { getLockedFacts, getScopeRecord, payableError, saveResearch } from '@/lib/audit-meta';
+import { getLockedFacts, getResearch, getScopeRecord, payableError, saveResearch } from '@/lib/audit-meta';
 
 // Tavily research + Gemini generation can take ~40s; without this, a short platform default can kill
 // the function after payment and leave a paid audit with no report.
@@ -154,6 +154,11 @@ export async function POST(req: Request) {
         language: (audit.reportLanguage as any) || 'Simple English',
         scope,
         founderFacts,
+      }, {
+        // Research is saved as soon as it exists; a retry after a failed decision stage reuses it
+        // instead of searching again (keeps retries fast and inside the time limit).
+        existingResearch: await getResearch(audit.id),
+        onResearch: (r) => saveResearch(audit.id, r),
       });
     } catch (error) {
       console.error('Aristotle audit engine failed:', error);

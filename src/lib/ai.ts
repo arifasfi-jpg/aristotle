@@ -1,10 +1,15 @@
-import { deterministicAudit, Sector, AuditReport, ReportLanguage } from './audit';
+import type { Sector, AuditReport, ReportLanguage } from './audit';
 import { estimateCompute } from './pricing';
 import { buildFounderFactsBlock, FACT_CONCEPTS, type FounderFact } from './founder-facts';
 import { validateReport } from './report-validation';
 import type { Scope } from './routing';
-import { toResearchRecord, validateEvidence, type ResearchRecord } from './evidence';
-import { isDemoMode } from './payments';
+import { validateEvidence, type ResearchRecord } from './evidence';
+import { callGeminiJson } from './gemini';
+import { researchBusiness, researchBrief } from './research';
+
+// Whole audit must fit the 60s serverless limit of /api/payments/verify (DB work included).
+const AUDIT_BUDGET_MS = 54_000;
+const MIN_DECIDE_MS = 15_000;
 
 type AuditInput = {
   idea: string;
@@ -29,29 +34,31 @@ killOrScale on moving from the current numbers to the stated targets. Keep exact
 
 const EVIDENCE_BLOCK = `
 ════════════════════════════════════════════════════════════════════════
-EVIDENCE DISCIPLINE (Aristotle's core rule: evidence over confidence)
+EVIDENCE DISCIPLINE (Aristotle's core rule: research before judgement, evidence over confidence)
 ════════════════════════════════════════════════════════════════════════
-Research sources below are labelled [S1], [S2], … Founder facts are labelled F1, F2, …
-Cite ONLY these ids. Never invent a source, statistic, competitor price, market size, regulation or URL.
+You receive a RESEARCH BRIEF: questions Q#, each with a STATUS and verified findings R# (each from a source S#).
+Founder facts are F#. These are the ONLY evidence. Your general knowledge is NOT evidence: anything you add
+from it must be labelled INFERENCE or ASSUMPTION, never FACT, and must not be presented as researched.
+Never invent a source, statistic, competitor, price, market size, regulation or URL.
 
 decisionMemo
-  decisionQuestion: the single decision the founder faces, in one plain sentence.
-  criticalAssumptions: EXACTLY 3 — the assumptions that decide whether this business works (demand, price /
-    willingness to pay, unit economics, channel, regulation…). For each:
-    evidenceStatus: SUPPORTED (cited evidence supports it) | PARTIAL | UNKNOWN (no evidence yet) | CONTRADICTED.
-    evidence: what the cited evidence actually says, or "No evidence yet".
-    evidenceIds: the S#/F# ids used. SUPPORTED/PARTIAL/CONTRADICTED require at least one id.
-    cheapestTest: the cheapest, fastest way to find out; experimentIndex: the matching experiment (1-5).
+  decisionQuestion: the single decision the founder faces, in one plain sentence, specific to this business.
+  criticalAssumptions: up to 3. Each MUST come from the research: a question whose STATUS is NOT_FOUND,
+    PARTIAL or CONTRADICTORY (cite it in basedOnQuestions), or a finding that contradicts the founder's plan.
+    Never write generic assumptions ("customers must pay", "the problem must be painful") — name the specific
+    customer, behaviour, price, channel or rule at stake for THIS business.
+    evidenceStatus: SUPPORTED | PARTIAL | UNKNOWN | CONTRADICTED. evidence: what the findings say, or
+    "No evidence found in research". evidenceIds: the R#/F# used (required unless UNKNOWN).
+    cheapestTest + experimentIndex: the matching experiment (1-5).
   proceedIf / changeModelIf: measurable conditions (numbers, thresholds, deadlines).
-  evidenceStillRequired: what is unknown and must be validated before serious investment.
+  evidenceStillRequired: every open question that matters, in plain words.
 
 evidence (6–12 items): the key claims this report relies on, each tagged:
-  FACT (from a cited source — sourceIds required) | FOUNDER (founder-confirmed fact — cite F#) |
-  CALCULATION (derived from facts) | ASSUMPTION (your estimate) | HYPOTHESIS (must be tested) |
-  INFERENCE (reasoned from evidence, not directly stated). confidence: HIGH | MEDIUM | LOW.
-  validation: how the founder can check it.
-If research is thin, say so. "Unknown" is an acceptable, honest answer.
-Challenge the founder: if an assumption looks unrealistic or the economics do not work, say why and show the math.
+  FACT (only from a finding — cite R#) | FOUNDER (cite F#) | CALCULATION (from F#/R# numbers) |
+  ASSUMPTION | HYPOTHESIS | INFERENCE. confidence: HIGH | MEDIUM | LOW. validation: how to check it.
+
+UNKNOWN is a correct, respected answer. A short report with real findings and honest unknowns is better
+than a long report of plausible guesses. Challenge the founder where findings contradict the plan.
 `;
 
 const PROVENANCE_BLOCK = `
@@ -66,64 +73,9 @@ provenance: FOUNDER_STATED (only for confirmed founder facts, with factId) | CAL
             ASSUMPTION (introduced because the founder did not provide it) | HYPOTHESIS (to be tested).
 basis: required for EXTERNAL / ASSUMPTION / HYPOTHESIS — say where the figure comes from.
 Units must match the concept: counts never carry ₹, money always carries ₹, margins are %.
-If an input is missing, do not fill it with a sector default silently: mark it ASSUMPTION and give the basis.
+EXTERNAL rows must list the finding ids (R#) they come from in inputs. If a number is not founder-stated,
+researched or calculated from those, DO NOT write a number: put the metric in unknownEconomics instead.
 `;
-
-type TavilyResult = {
-  title?: string;
-  url?: string;
-  content?: string;
-  score?: number;
-};
-
-async function tavilySearch(query: string): Promise<TavilyResult[]> {
-  const key = process.env.TAVILY_API_KEY;
-  if (!key) throw new Error('TAVILY_API_KEY is not configured');
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000);
-
-  try {
-    const response = await fetch('https://api.tavily.com/search', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: controller.signal,
-      body: JSON.stringify({
-        api_key: key,
-        query,
-        search_depth: 'basic',
-        max_results: 2,
-        include_answer: false,
-        include_raw_content: false,
-      }),
-    });
-
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`TAVILY_ERROR ${response.status}: ${body.slice(0, 500)}`);
-    }
-
-    const data = await response.json();
-    return Array.isArray(data?.results) ? data.results : [];
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new Error(`TAVILY_TIMEOUT after 12 seconds`);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-function cleanJson(text: string): string {
-  const trimmed = text.trim();
-  if (trimmed.startsWith('```')) {
-    return trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-  }
-  const first = trimmed.indexOf('{');
-  const last = trimmed.lastIndexOf('}');
-  return first >= 0 && last > first ? trimmed.slice(first, last + 1) : trimmed;
-}
 
 // ---------------------------------------------------------------------------
 // Gemini responseSchema — mirrors AuditReport exactly.
@@ -149,8 +101,9 @@ const AUDIT_RESPONSE_SCHEMA = {
               evidenceIds: { type: 'array', items: { type: 'string' } },
               cheapestTest: { type: 'string' },
               experimentIndex: { type: 'number' },
+              basedOnQuestions: { type: 'array', items: { type: 'string' } },
             },
-            required: ['assumption', 'whyItMatters', 'evidenceStatus', 'evidence', 'evidenceIds', 'cheapestTest', 'experimentIndex'],
+            required: ['assumption', 'whyItMatters', 'evidenceStatus', 'evidence', 'evidenceIds', 'cheapestTest', 'experimentIndex', 'basedOnQuestions'],
           },
         },
         proceedIf: { type: 'array', items: { type: 'string' } },
@@ -158,6 +111,10 @@ const AUDIT_RESPONSE_SCHEMA = {
         evidenceStillRequired: { type: 'array', items: { type: 'string' } },
       },
       required: ['decisionQuestion', 'criticalAssumptions', 'proceedIf', 'changeModelIf', 'evidenceStillRequired'],
+    },
+    unknownEconomics: {
+      type: 'array',
+      items: { type: 'object', properties: { metric: { type: 'string' }, whyUnknown: { type: 'string' }, howToEstablish: { type: 'string' } }, required: ['metric', 'whyUnknown', 'howToEstablish'] },
     },
     evidence: {
       type: 'array',
@@ -265,8 +222,11 @@ const AUDIT_RESPONSE_SCHEMA = {
           action: { type: 'string' },
           source: { type: 'string' },
           trigger: { type: 'string' },
+          activity: { type: 'string' },
+          requirement: { type: 'string' },
+          sourceIds: { type: 'array', items: { type: 'string' } },
         },
-        required: ['name', 'status', 'rationale', 'action', 'source', 'trigger'],
+        required: ['name', 'status', 'rationale', 'action', 'activity', 'requirement', 'sourceIds'],
       },
     },
     vulnerabilities: {
@@ -313,7 +273,7 @@ const AUDIT_RESPONSE_SCHEMA = {
     'whyItCouldWork', 'whatMustBeTrue', 'customer', 'businessModel', 'marketView',
     'unitEconomics', 'experiments', 'operatingModel', 'technologyBuild', 'regulatory',
     'vulnerabilities', 'goToMarket', 'thirtyDayPlan', 'killOrScale', 'assumptions', 'nextSteps',
-    'decisionMemo', 'evidence',
+    'decisionMemo', 'evidence', 'unknownEconomics',
   ],
 };
 
@@ -455,37 +415,16 @@ marketView.competition
 marketView.marketRisk
   Single biggest market-level risk for this specific idea and operating model.
 
-unitEconomics (3–8 rows)
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  CRITICAL RULES:
-  • Build from the actual pricing and model described by the founder.
-  • If pricing is given (e.g. ₹1,499/month + ₹5/order), model BOTH revenue streams.
-  • Never substitute generic sector averages for founder-provided numbers.
-  • All three scenario values (conservative, base, upside) must be finite numbers.
-  • Conservative < Base < Upside for revenue rows; Upside < Base < Conservative for cost rows.
-  • Units must be correct and specific: ₹/pharmacy/month, orders/pharmacy/month, ₹/order, months.
-    Never put a currency symbol before a count (e.g. "300 orders" not "₹300 orders").
-  • Every row MUST have both fields populated:
-    - commentary: explain what this row measures and how the numbers were derived.
-    - assumption: start with one of FOUNDER-STATED / ASSUMPTION / INFERENCE / NOT VERIFIED,
-      then state the specific basis. Examples:
-        FOUNDER-STATED: ₹1,499 monthly subscription as specified by founder.
-        FOUNDER-STATED: ₹5 fee per successfully completed order.
-        ASSUMPTION: 300 orders per pharmacy per month; requires pilot validation.
-        NOT VERIFIED: WhatsApp API cost — depends on final messaging architecture.
-  • Do not invent precise variable costs without labelling them NOT VERIFIED.
-  • If contribution margin cannot be reliably calculated, say so explicitly in commentary.
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Suggested structure for subscription + per-transaction model:
-    Row 1: Monthly subscription revenue per active customer (unit: ₹/customer/month)
-    Row 2: Orders processed per active customer per month (unit: orders/customer/month)
-    Row 3: Per-order platform revenue (unit: ₹/order)
-    Row 4: Total platform revenue per customer per month (unit: ₹/customer/month)
-    Row 5: Estimated variable cost per customer per month (unit: ₹/customer/month)
-    Row 6: Gross contribution per customer per month (unit: ₹/customer/month)
-    Row 7: Customer acquisition cost (unit: ₹/customer)
-    Row 8: CAC payback (unit: months)
-  Adapt rows to fit the actual model.
+unitEconomics (0–8 rows) — numbers ONLY from:
+  • founder facts (provenance FOUNDER_STATED, factId F#),
+  • research findings (provenance EXTERNAL, inputs [R#…]),
+  • transparent calculations from those (provenance CALCULATED, inputs = F#/R# ids or metrics of such rows).
+  Never use sector averages, typical margins, benchmark CAC or guesses. An empty table is acceptable.
+  Units must be specific (₹/customer/month, orders/month, months); never ₹ before a count.
+  commentary: how the number was obtained. assumption: FOUNDER-STATED / RESEARCHED / CALCULATED + basis.
+
+unknownEconomics — every important metric that could NOT be established (price, CAC, margin, volume, cost…):
+  metric, whyUnknown (what research did not find), howToEstablish (the cheapest way to measure it).
 
 experiments (EXACTLY 5 objects)
   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -531,13 +470,13 @@ technologyBuild.avoidBuilding (3–5 strings)
 technologyBuild.estimatedBuildApproach
   Concrete build path. Name the core technical decision for this product.
 
-regulatory
-  ONLY include regulations triggered by the actual operating model.
-  For each: name, status ("Likely"|"Conditional"|"Low signal"), rationale, trigger (the specific activity in
-  THIS business that triggers it), action, source (a researched URL [S#] or the official regulator's .gov.in /
-  regulator homepage; leave empty if unsure — unverifiable links are removed).
-  Do NOT default-include GST/MSME/DPDP/BIS/RBI/SEBI/IRDAI.
-  Say "Requires legal verification." where needed.
+regulatory — ONLY conclusions supported by the research brief:
+  activity (the specific activity in THIS business, from the business model), requirement (what the rule
+  requires), name, status ("Likely"|"Conditional"|"Low signal"), rationale, action, sourceIds (R#/S# that
+  support it — REQUIRED), source (leave empty; the server fills it from sourceIds).
+  If research found nothing on a regulated activity, do NOT list a regulation for it — add
+  "Confirm the regulation for <activity>" to decisionMemo.evidenceStillRequired instead.
+  Never add GST/MSME/DPDP/BIS/RBI/SEBI/IRDAI by default. Say "Requires legal verification." where needed.
 
 vulnerabilities (5–7 objects)
   Each risk specific to THIS business. probability/impact: Low/Medium/High.
@@ -564,7 +503,7 @@ nextSteps (5–7 strings)
   Concrete this-week actions. Name the customer, channel, and test.
 
 ════════════════════════════════════════════════════════════════════════
-RESEARCH (use to improve market, competitor and regulatory sections)
+RESEARCH BRIEF (Aristotle researched this business before this step — use ONLY this as evidence)
 ════════════════════════════════════════════════════════════════════════
 ${research}
 
@@ -573,7 +512,7 @@ EVIDENCE RULES
 ════════════════════════════════════════════════════════════════════════
 - Never invent a statistic, competitor name, regulation, price, or URL.
 - Mark unverified claims: (INFERENCE) or (NOT VERIFIED).
-- Use real regulator URLs only. If unsure, use the regulator homepage.
+- Cite findings (R#) for anything presented as researched. Do not write URLs yourself.
 - If research is thin, say so — do not fill gaps with invented facts.
 - Do not import financial-regulation sections unless the idea involves financial services.
 - Distinguish: FACT (founder input or verified source) / ASSUMPTION (your estimate, labelled) /
@@ -584,166 +523,47 @@ EVIDENCE RULES
 // ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
-export async function runAudit(input: AuditInput) {
-  const fallback = deterministicAudit(input);
-  const geminiKey = process.env.GEMINI_API_KEY;
-  const tavilyKey = process.env.TAVILY_API_KEY;
-
-  if (!geminiKey || !tavilyKey) {
-    // A paying founder must never receive a template dressed up as research. Outside Demo Mode this is a
-    // failure (the audit stays paid and can be retried once the engine is configured).
-    if (!isDemoMode()) throw new Error('AI_ENGINE_NOT_CONFIGURED: research or generation credentials are missing');
-    return {
-      research: null as ResearchRecord | null,
-      report: validateEvidence(validateReport(fallback, input.founderFacts).report, null, input.founderFacts).report,
-      pricing: estimateCompute(0, 0),
-      provider: 'deterministic-no-key',
-    };
+/**
+ * The audit engine. Aristotle researches the specific business BEFORE writing the decision memo:
+ *   PLAN → SEARCH → EXTRACT (see research.ts) → DECIDE (below).
+ * There is no template path: without research credentials the audit fails (retryable), in every
+ * environment including Demo Mode. Demo Mode only skips the Razorpay payment.
+ *
+ * `existingResearch`: research already completed for this audit (e.g. a retry after the decision stage
+ * failed) is reused instead of searching again. `onResearch` persists research as soon as it exists.
+ */
+export async function runAudit(input: AuditInput, opts: { existingResearch?: ResearchRecord | null; onResearch?: (r: ResearchRecord) => Promise<void>; budgetMs?: number } = {}) {
+  const start = Date.now();
+  const deadline = start + (opts.budgetMs ?? AUDIT_BUDGET_MS);
+  if (!process.env.GEMINI_API_KEY || !process.env.TAVILY_API_KEY) {
+    throw new Error('AI_ENGINE_NOT_CONFIGURED: research or generation credentials are missing');
   }
+  console.log(JSON.stringify({ event: 'aristotle_audit_start', sector: input.sector, stage: input.stage, geography: input.geography, scope: input.scope, founderFacts: input.founderFacts?.length ?? 0, reusedResearch: Boolean(opts.existingResearch) }));
 
-  let researchRecord: ResearchRecord | null = null;
-  try {
-    console.log(JSON.stringify({
-      event: 'aristotle_audit_start',
-      sector: input.sector,
-      stage: input.stage,
-      geography: input.geography,
-      scope: input.scope,
-      founderFacts: input.founderFacts?.length ?? 0,
-    }));
-
-    const geography = input.geography || 'India';
-    const queries = [
-      `"${input.idea}" ${geography} regulations licensing compliance`,
-      `${input.sector} ${geography} competitors alternatives pricing`,
-      `"${input.idea}" ${geography} customer demand market alternatives`,
-    ];
-
-    const settled = await Promise.allSettled(
-      queries.map(async (query) => ({ query, results: await tavilySearch(query) })),
-    );
-
-    const groups = settled.flatMap((result) =>
-      result.status === 'fulfilled' ? [result.value] : [],
-    );
-
-    if (groups.length === 0) {
-      const failures = settled
-        .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
-        .map((result) => result.reason instanceof Error ? result.reason.message : String(result.reason));
-      throw new Error(`All Tavily research calls failed: ${failures.join(' | ')}`);
-    }
-
-    // Evidence layer: every source gets a stable id that the report must cite; persisted as research.json.
-    researchRecord = toResearchRecord(groups);
-    const idByUrl = new Map(researchRecord.sources.map((src) => [src.url, src.id]));
-    const research = groups.map(({ query, results }) => [
-      `SEARCH: ${query}`,
-      ...results.map((r) => [
-        `[${idByUrl.get(r.url || '') ?? 'S?'}] TITLE: ${r.title || 'Untitled'}`,
-        `URL: ${r.url || ''}`,
-        `CONTENT: ${(r.content || '').slice(0, 1800)}`,
-      ].join('\n')),
-    ].join('\n')).join('\n---\n').slice(0, 14000);
-
-    const finalPrompt = buildPrompt(input, research);
-
-    let geminiResponse: Response;
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 38000);
-
-      try {
-        geminiResponse = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite'}:generateContent`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-goog-api-key': geminiKey,
-            },
-            body: JSON.stringify({
-              contents: [
-                {
-                  role: 'user',
-                  parts: [{ text: finalPrompt }],
-                },
-              ],
-              generationConfig: {
-                responseMimeType: 'application/json',
-                responseSchema: AUDIT_RESPONSE_SCHEMA,
-                maxOutputTokens: 16384, // decision memo + evidence register need headroom; truncated JSON fails the audit
-              },
-            }),
-            signal: controller.signal,
-          },
-        );
-      } finally {
-        clearTimeout(timeout);
-      }
-    } catch (error) {
-      const detail =
-        error instanceof Error && error.name === 'AbortError'
-          ? 'Request timed out after 38 seconds'
-          : error instanceof Error
-            ? error.message
-            : String(error);
-      throw new Error(`GEMINI_ERROR: ${detail}`);
-    }
-
-    if (!geminiResponse.ok) {
-      const body = await geminiResponse.text();
-      throw new Error(
-        `GEMINI_ERROR: HTTP ${geminiResponse.status}: ${body.slice(0, 600)}`
-      );
-    }
-
-    const geminiJson = await geminiResponse.json() as {
-      candidates?: Array<{
-        content?: { parts?: Array<{ text?: string }> };
-      }>;
-      usageMetadata?: {
-        promptTokenCount?: number;
-        candidatesTokenCount?: number;
-        totalTokenCount?: number;
-      };
-    };
-
-    const text =
-      geminiJson.candidates?.[0]?.content?.parts
-        ?.map((part) => part.text || '')
-        .join('') || '';
-
-    if (!text) throw new Error('GEMINI_ERROR: Gemini returned an empty response');
-
-    const parsed = JSON.parse(cleanJson(text)) as AuditReport;
-    // Prompting alone is not trusted: founder facts, provenance, calculations and units are enforced here.
-    const { report: numbersChecked, log } = validateReport(parsed, input.founderFacts);
-    const { report, log: evidenceLog } = validateEvidence(numbersChecked, researchRecord, input.founderFacts);
-    console.log(JSON.stringify({ event: 'aristotle_evidence_validated', sources: researchRecord?.sources.length ?? 0, ...evidenceLog }));
-    console.log(JSON.stringify({ event: 'aristotle_report_validated', corrected: log.corrected.length, keptAsScenario: log.keptAsScenario.length, downgraded: log.downgraded.length, converted: log.converted.length, unitFixed: log.unitFixed.length, insertedFacts: log.insertedFacts.length, proseConflicts: log.proseConflicts.length }));
-    const inputTokens = geminiJson.usageMetadata?.promptTokenCount || 0;
-    const outputTokens = geminiJson.usageMetadata?.candidatesTokenCount || 0;
-
-    console.log(JSON.stringify({
-      event: 'aristotle_audit_complete',
-      inputTokens,
-      outputTokens,
-      provider: 'gemini-structured-tavily',
-    }));
-
-    return {
-      research: researchRecord,
-      report,
-      pricing: estimateCompute(inputTokens, outputTokens),
-      provider: 'gemini-structured-tavily',
-    };
-  } catch (error) {
-    console.error(
-      'Aristotle research audit failed:',
-      error instanceof Error ? error.message : error,
-    );
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`Research engine failed: ${message}`);
+  // RESEARCH (or reuse)
+  let research = opts.existingResearch?.version === 2 ? opts.existingResearch : null;
+  if (!research) {
+    const facts = (input.founderFacts || []).filter((f) => f.locked);
+    research = await researchBusiness({ idea: input.idea, sector: input.sector, stage: input.stage, geography: input.geography, founderFactsText: facts.map((f) => `${f.id}: ${f.concept} ${f.timeframe} ${f.raw}`).join('\n') }, deadline);
+    if (opts.onResearch) await opts.onResearch(research);
   }
+  const answered = (research.questions || []).filter((q) => q.status === 'ANSWERED' || q.status === 'PARTIAL').length;
+  console.log(JSON.stringify({ event: 'aristotle_research_complete', questions: research.questions?.length ?? 0, answered, sources: research.sources.length, findings: research.findings?.length ?? 0, ms: Date.now() - start }));
+
+  // DECIDE
+  const decideTimeout = deadline - Date.now() - 1000;
+  if (decideTimeout < MIN_DECIDE_MS) {
+    throw new Error('AUDIT_TIME_BUDGET_EXCEEDED: research is saved; retry to complete the decision memo');
+  }
+  const decision = await callGeminiJson<AuditReport>({ label: 'decision', prompt: buildPrompt(input, researchBrief(research)), schema: AUDIT_RESPONSE_SCHEMA, maxOutputTokens: 12000, timeoutMs: decideTimeout });
+
+  // Prompting alone is not trusted: founder facts, numbers, citations, assumptions and regulation are enforced here.
+  const { report: numbersChecked, log } = validateReport(decision.data, input.founderFacts);
+  const { report, log: evidenceLog } = validateEvidence(numbersChecked, research, input.founderFacts);
+  console.log(JSON.stringify({ event: 'aristotle_evidence_validated', ...evidenceLog, corrected: log.corrected.length, insertedFacts: log.insertedFacts.length, proseConflicts: log.proseConflicts.length }));
+
+  const inputTokens = decision.inputTokens + (opts.existingResearch ? 0 : research.usage?.inputTokens ?? 0);
+  const outputTokens = decision.outputTokens + (opts.existingResearch ? 0 : research.usage?.outputTokens ?? 0);
+  console.log(JSON.stringify({ event: 'aristotle_audit_complete', inputTokens, outputTokens, ms: Date.now() - start }));
+  return { research, report, pricing: estimateCompute(inputTokens, outputTokens), provider: 'aristotle-research-v2' };
 }

@@ -1,5 +1,8 @@
 import { deterministicAudit, Sector, AuditReport, ReportLanguage } from './audit';
 import { estimateCompute } from './pricing';
+import { buildFounderFactsBlock, FACT_CONCEPTS, type FounderFact } from './founder-facts';
+import { validateReport } from './report-validation';
+import type { Scope } from './routing';
 
 type AuditInput = {
   idea: string;
@@ -7,7 +10,35 @@ type AuditInput = {
   stage?: string;
   geography?: string;
   language?: ReportLanguage;
+  /** Founder-confirmed scope. NEW_IDEA (or undefined) keeps the original audit behaviour. */
+  scope?: Scope;
+  /** Founder-confirmed, locked facts. Sent to Gemini by ID and enforced by validateReport. */
+  founderFacts?: FounderFact[];
 };
+
+const GROWTH_PLAN_BLOCK = `
+════════════════════════════════════════════════════════════════════════
+SCOPE: EXISTING BUSINESS / GROWTH PLAN (founder-confirmed)
+════════════════════════════════════════════════════════════════════════
+The founder confirmed this business already operates. Treat it as an operating business, not an idea.
+Use the CURRENT founder facts as the baseline and focus unitEconomics, experiments, thirtyDayPlan and
+killOrScale on moving from the current numbers to the stated targets. Keep exactly the same JSON contract.
+`;
+
+const PROVENANCE_BLOCK = `
+════════════════════════════════════════════════════════════════════════
+NUMERIC PROVENANCE (required on every unitEconomics row)
+════════════════════════════════════════════════════════════════════════
+concept: what the number measures (${[...FACT_CONCEPTS, 'contribution', 'cac', 'payback'].join(', ')}).
+timeframe: CURRENT (already happening) | TARGET (founder goal) | PROPOSED (planned price or estimate) |
+           CONDITIONAL | PROJECTION (what you calculate could happen) | ASSUMPTION (you introduced it).
+provenance: FOUNDER_STATED (only for confirmed founder facts, with factId) | CALCULATED (derived only from
+            founder facts or assumption rows, listed in inputs) | EXTERNAL (from research) |
+            ASSUMPTION (introduced because the founder did not provide it) | HYPOTHESIS (to be tested).
+basis: required for EXTERNAL / ASSUMPTION / HYPOTHESIS — say where the figure comes from.
+Units must match the concept: counts never carry ₹, money always carries ₹, margins are %.
+If an input is missing, do not fill it with a sector default silently: mark it ASSUMPTION and give the basis.
+`;
 
 type TavilyResult = {
   title?: string;
@@ -120,8 +151,14 @@ const AUDIT_RESPONSE_SCHEMA = {
           unit: { type: 'string' },
           commentary: { type: 'string' },
           assumption: { type: 'string' },
+          concept: { type: 'string', enum: [...FACT_CONCEPTS, 'contribution', 'cac', 'payback'] },
+          timeframe: { type: 'string', enum: ['CURRENT', 'TARGET', 'PROPOSED', 'CONDITIONAL', 'PROJECTION', 'ASSUMPTION'] },
+          provenance: { type: 'string', enum: ['FOUNDER_STATED', 'CALCULATED', 'EXTERNAL', 'ASSUMPTION', 'HYPOTHESIS'] },
+          factId: { type: 'string' },
+          inputs: { type: 'array', items: { type: 'string' } },
+          basis: { type: 'string' },
         },
-        required: ['metric', 'conservative', 'base', 'upside', 'unit', 'commentary', 'assumption'],
+        required: ['metric', 'conservative', 'base', 'upside', 'unit', 'commentary', 'assumption', 'concept', 'timeframe', 'provenance'],
       },
     },
     experiments: {
@@ -222,7 +259,7 @@ function buildPrompt(input: AuditInput, research: string): string {
 You produce a paid founder decision memo for a specific business idea.
 
 LANGUAGE: ${lang}
-
+${input.scope === 'GROWTH_PLAN' ? GROWTH_PLAN_BLOCK : ''}${buildFounderFactsBlock(input.founderFacts)}${PROVENANCE_BLOCK}
 ════════════════════════════════════════════════════════════════════════
 OUTPUT CONTRACT
 ════════════════════════════════════════════════════════════════════════
@@ -482,7 +519,7 @@ export async function runAudit(input: AuditInput) {
 
   if (!geminiKey || !tavilyKey) {
     return {
-      report: fallback,
+      report: validateReport(fallback, input.founderFacts).report,
       pricing: estimateCompute(0, 0),
       provider: 'deterministic-no-key',
     };
@@ -494,6 +531,8 @@ export async function runAudit(input: AuditInput) {
       sector: input.sector,
       stage: input.stage,
       geography: input.geography,
+      scope: input.scope,
+      founderFacts: input.founderFacts?.length ?? 0,
     }));
 
     const geography = input.geography || 'India';
@@ -597,7 +636,10 @@ export async function runAudit(input: AuditInput) {
 
     if (!text) throw new Error('GEMINI_ERROR: Gemini returned an empty response');
 
-    const report = JSON.parse(cleanJson(text)) as AuditReport;
+    const parsed = JSON.parse(cleanJson(text)) as AuditReport;
+    // Prompting alone is not trusted: founder facts, provenance, calculations and units are enforced here.
+    const { report, log } = validateReport(parsed, input.founderFacts);
+    console.log(JSON.stringify({ event: 'aristotle_report_validated', corrected: log.corrected.length, keptAsScenario: log.keptAsScenario.length, downgraded: log.downgraded.length, converted: log.converted.length, unitFixed: log.unitFixed.length, insertedFacts: log.insertedFacts.length, proseConflicts: log.proseConflicts.length }));
     const inputTokens = geminiJson.usageMetadata?.promptTokenCount || 0;
     const outputTokens = geminiJson.usageMetadata?.candidatesTokenCount || 0;
 

@@ -49,6 +49,14 @@ vi.mock('@/lib/db', () => ({
       },
       findMany: async ({ where }: Row) => [...db.audits.values()].filter((x) => matches(x, where)).map((x) => ({ ...x })),
     },
+    projectFile: {
+      findUnique: async ({ where }: Row) => db.files.find((f) => f.auditId === where.auditId_path.auditId && f.path === where.auditId_path.path) ?? null,
+      upsert: async ({ where, update, create }: Row) => {
+        const f = db.files.find((x) => x.auditId === where.auditId_path.auditId && x.path === where.auditId_path.path);
+        if (f) { Object.assign(f, update); return f; }
+        db.files.push({ ...create }); return create;
+      },
+    },
   },
 }));
 

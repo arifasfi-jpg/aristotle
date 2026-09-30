@@ -3,6 +3,7 @@ import { ArrowDownToLine, CheckCircle2, ExternalLink, ShieldAlert, Target, Trend
 import { db } from '@/lib/db';
 import { getCurrentUser } from '@/lib/session';
 import { AuditReport, deterministicAudit } from '@/lib/audit';
+import RetryAnalysis from '@/components/RetryAnalysis';
 import { getLockedFacts, getScopeRecord } from '@/lib/audit-meta';
 import { CONCEPT_LABEL, COUNT_CONCEPTS, TIMEFRAME_LABEL, formatFactValue, type FactConcept } from '@/lib/founder-facts';
 import { OUT_OF_SCOPE_MESSAGES, SCOPE_LABEL } from '@/lib/routing';
@@ -17,7 +18,17 @@ export default async function AuditPage({params}:{params:Promise<{id:string}>}){
  if(!user)return <main className="mx-auto max-w-4xl px-6 py-20"><h1 className="text-3xl font-semibold">Session required</h1><p className="mt-3 text-[#93a0b5]">Open this audit in the same browser session used to submit it.</p></main>;
  const audit=await db.audit.findFirst({where:{id,userId:user.id}}); if(!audit)return notFound();
  if(audit.status==='out_of_scope')return <main className="mx-auto max-w-4xl px-6 py-20"><h1 className="text-3xl font-semibold">Outside Aristotle's audit scope</h1><p className="mt-3 text-[#93a0b5]">{OUT_OF_SCOPE_MESSAGES.default} You have not been charged.</p></main>;
- if(audit.status!=='completed')return <main className="mx-auto max-w-4xl px-6 py-20"><h1 className="text-3xl font-semibold">Audit processing</h1><p className="mt-3 text-[#93a0b5]">This audit has not completed yet.</p></main>;
+ // Never show a report unless this audit was paid AND generation finished.
+ if(audit.status!=='completed'||audit.paymentStatus!=='paid'||audit.report==='{}'){
+  const stale=audit.status==='generating'&&Date.now()-new Date(audit.updatedAt).getTime()>3*60*1000;
+  const paid=audit.paymentStatus==='paid';
+  const orderPending=!paid&&!!audit.paymentRef&&audit.paymentRef.startsWith('order_');
+  const shell=(title:string,text:string,retry?:string)=><main className="mx-auto max-w-4xl px-6 py-20"><h1 className="text-3xl font-semibold">{title}</h1><p className="mt-3 text-[#93a0b5]">{text}</p>{retry&&<RetryAnalysis auditId={audit.id} label={retry}/>}</main>;
+  if(paid&&(audit.status==='failed'||stale||audit.status==='completed'))return shell('Analysis not finished yet','Your payment was successful, but Aristotle could not complete the analysis yet.','Retry Analysis');
+  if(paid)return shell('Audit processing','Aristotle is generating your analysis. This usually takes under a minute; refresh this page shortly.');
+  if(orderPending)return shell('Waiting for payment confirmation','If you completed the ₹99 payment, Aristotle can check it with Razorpay and continue. You will not be charged again.','Check payment & continue');
+  return shell('Audit not paid yet','This audit has not been paid for, so no report has been generated.');
+ }
  const raw=JSON.parse(audit.report) as Partial<AuditReport>;
  // obj: safely spread a value as a plain object, fall back to {} if it isn't one
  const obj=(v:unknown)=>v&&typeof v==='object'&&!Array.isArray(v)?v as Record<string,unknown>:{};

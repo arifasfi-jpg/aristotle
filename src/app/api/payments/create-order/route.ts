@@ -16,5 +16,5 @@ export async function POST(req:Request){
  const order=await rp.orders.create({amount:audit.pricePaise,currency:'INR',receipt:audit.id});
  // Storing the order id freezes the confirmed scope (the scope route refuses changes once paymentRef is set).
  await db.audit.update({where:{id:audit.id},data:{paymentRef:order.id}});
- return NextResponse.json({demo:false,orderId:order.id,amount:order.amount,currency:order.currency,keyId:process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID});
+ return NextResponse.json({demo:false,orderId:order.id,amount:order.amount,currency:order.currency,keyId:process.env.RAZORPAY_KEY_ID});// same key id the order was created with (a key id is public; the secret never leaves the server)
 }

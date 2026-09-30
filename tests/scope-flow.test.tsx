@@ -38,7 +38,14 @@ vi.mock('@/lib/db', () => ({
 }));
 let jar = new Map<string, string>();
 vi.mock('next/headers', () => ({ cookies: async () => ({ get: (n: string) => (jar.has(n) ? { name: n, value: jar.get(n)! } : undefined), set: (n: string, v: string) => { jar.set(n, v); } }) }));
-vi.mock('razorpay', () => ({ default: class { orders = { create: async (o: Row) => ({ id: `order_${o.receipt}`, amount: o.amount, currency: 'INR' }) }; } }));
+// Fake Razorpay account: orders can be marked paid to simulate "paid but browser never reported back".
+const rzOrders = new Map<string, Row>();
+vi.mock('razorpay', () => ({ default: class { orders = {
+  create: async (o: Row) => { const ord = { id: `order_${o.receipt}`, amount: o.amount, currency: 'INR', receipt: o.receipt, status: 'created' }; rzOrders.set(ord.id, ord); return { ...ord }; },
+  fetch: async (id: string) => ({ ...rzOrders.get(id) }),
+  fetchPayments: async (id: string) => ({ items: rzOrders.get(id)?.status === 'paid' ? [{ id: 'pay_reconciled1', status: 'captured' }] : [] }),
+}; } }));
+vi.mock('next/link', () => ({ default: ({ href, children, ...p }: any) => <a href={href} {...p}>{children}</a> }));
 const runAudit = vi.fn(async (input: Row) => {
   const { deterministicAudit } = await import('@/lib/audit');
   const { validateReport } = await import('@/lib/report-validation');
@@ -51,6 +58,10 @@ const { POST: scopeRoute } = await import('@/app/api/audits/[id]/scope/route');
 const { POST: createOrder } = await import('@/app/api/payments/create-order/route');
 const { POST: verify } = await import('@/app/api/payments/verify/route');
 const { GET: exportAudit } = await import('@/app/api/audits/[id]/export/route');
+const verifyModule = await import('@/app/api/payments/verify/route');
+const { default: AuditPage } = await import('@/app/audit/[id]/page');
+const { renderToStaticMarkup } = await import('react-dom/server');
+const page = async (id: string) => { try { return renderToStaticMarkup(await AuditPage({ params: Promise.resolve({ id }) })); } catch (e: any) { return String(e?.digest ?? e); } };
 
 const post = (body: unknown) => new Request('http://x', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 const ctx = (id: string) => ({ params: Promise.resolve({ id }) });
@@ -66,7 +77,7 @@ const PHARMA = 'I want to launch a pharmacy SaaS at ₹1,499/month and target 20
 const GLUCO = 'Glucometer business: currently selling 1,400 units/month. Cost is ₹500 per item. Margin is 10–12%.';
 
 beforeEach(() => {
-  db.users.clear(); db.sessions.clear(); db.audits.clear(); db.files.length = 0; jar = new Map(); runAudit.mockClear();
+  db.users.clear(); db.sessions.clear(); db.audits.clear(); db.files.length = 0; jar = new Map(); runAudit.mockClear(); rzOrders.clear();
   for (const k of ['RAZORPAY_KEY_ID', 'RAZORPAY_KEY_SECRET', 'DEMO_MODE', 'VERCEL_ENV', 'GEMINI_API_KEY']) delete process.env[k];
   process.env.DEMO_MODE = 'true'; process.env.VERCEL_ENV = 'preview';
   vi.unstubAllGlobals();
@@ -232,5 +243,104 @@ describe('Lock-and-Barrel Export', () => {
     expect(zip.file('project/scope.json')).toBeTruthy();
     expect(zip.file('project/founder-facts.json')).toBeTruthy();
     expect(audit.pricing.platformMargin).toBe('10% of disclosed compute');
+  });
+});
+
+describe('Razorpay TEST/LIVE flow and recovery', () => {
+  const live = () => { process.env.DEMO_MODE = 'false'; process.env.RAZORPAY_KEY_ID = 'rzp_test_KEYID'; process.env.RAZORPAY_KEY_SECRET = 's3cret'; };
+  const sign = (o: string, p: string) => crypto.createHmac('sha256', 's3cret').update(`${o}|${p}`).digest('hex');
+  async function paidReadyAudit() {
+    const id = await newAudit('I want to launch a pharmacy platform in Pune for chemists.');
+    await scope(id, { action: 'suggest' });
+    await scope(id, { action: 'confirm', scope: 'NEW_IDEA', facts: [] });
+    return id;
+  }
+
+  it('Checkout gets the same key id the order was created with; order is ₹99 and tied to this audit', async () => {
+    live();
+    const id = await paidReadyAudit();
+    const o = (await order(id)).body;
+    expect(o).toMatchObject({ demo: false, keyId: 'rzp_test_KEYID', amount: 9900, orderId: `order_${id}` });
+    expect(rzOrders.get(o.orderId)).toMatchObject({ amount: 9900, receipt: id });
+  });
+
+  it('valid signature → paid → report generated → shown on the audit page', async () => {
+    live();
+    const id = await paidReadyAudit();
+    const o = (await order(id)).body;
+    const r = await call(verify(post({ auditId: id, razorpay_order_id: o.orderId, razorpay_payment_id: 'pay_1', razorpay_signature: sign(o.orderId, 'pay_1') })));
+    expect(r.status).toBe(200);
+    expect(db.audits.get(id)).toMatchObject({ paymentStatus: 'paid', status: 'completed', paymentRef: 'pay_1' });
+    expect(await page(id)).toContain('THE ANSWER IN 60 SECONDS');
+  });
+
+  it('invalid signature → rejected, nothing generated, not paid', async () => {
+    live();
+    const id = await paidReadyAudit();
+    const o = (await order(id)).body;
+    const r = await call(verify(post({ auditId: id, razorpay_order_id: o.orderId, razorpay_payment_id: 'pay_1', razorpay_signature: 'forged' })));
+    expect(r.status).toBe(400);
+    expect(runAudit).not.toHaveBeenCalled();
+    expect(db.audits.get(id)!.paymentStatus).toBe('pending');
+  });
+
+  it('missing Razorpay secret at verification → configuration error, nothing generated', async () => {
+    live();
+    const id = await paidReadyAudit();
+    const o = (await order(id)).body;
+    delete process.env.RAZORPAY_KEY_SECRET;
+    const r = await call(verify(post({ auditId: id, razorpay_order_id: o.orderId, razorpay_payment_id: 'pay_1', razorpay_signature: 'x' })));
+    expect(r.status).toBe(500);
+    expect(runAudit).not.toHaveBeenCalled();
+  });
+
+  it('paid but the browser never reported back → "Check payment & continue" asks Razorpay and generates, without charging again', async () => {
+    live();
+    const id = await paidReadyAudit();
+    const o = (await order(id)).body;
+    expect(await page(id)).toContain('Check payment &amp; continue');
+    // Not paid at Razorpay yet → refused
+    expect((await call(verify(post({ auditId: id })))).status).toBe(402);
+    expect(runAudit).not.toHaveBeenCalled();
+    // Razorpay reports the order as paid → recovered
+    rzOrders.get(o.orderId)!.status = 'paid';
+    expect((await call(verify(post({ auditId: id })))).status).toBe(200);
+    expect(db.audits.get(id)).toMatchObject({ paymentStatus: 'paid', status: 'completed', paymentRef: 'pay_reconciled1' });
+    expect(runAudit).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovery refuses an order whose amount or receipt does not match this audit', async () => {
+    live();
+    const id = await paidReadyAudit();
+    const o = (await order(id)).body;
+    Object.assign(rzOrders.get(o.orderId)!, { status: 'paid', amount: 100 });
+    expect((await call(verify(post({ auditId: id })))).status).toBe(402);
+    expect(runAudit).not.toHaveBeenCalled();
+  });
+
+  it('AI failure after payment → page shows "payment was successful" + Retry; retry generates without new payment', async () => {
+    live();
+    const id = await paidReadyAudit();
+    const o = (await order(id)).body;
+    runAudit.mockImplementationOnce(async () => { throw new Error('TAVILY_TIMEOUT'); });
+    expect((await call(verify(post({ auditId: id, razorpay_order_id: o.orderId, razorpay_payment_id: 'pay_9', razorpay_signature: sign(o.orderId, 'pay_9') })))).status).toBe(502);
+    const html = await page(id);
+    expect(html).toContain('Your payment was successful, but Aristotle could not complete the analysis yet.');
+    expect(html).toContain('Retry Analysis');
+    expect((await order(id)).status).toBe(409); // cannot be charged again
+    expect((await call(verify(post({ auditId: id })))).status).toBe(200);
+    expect(db.audits.get(id)!.paymentRef).toBe('pay_9');
+    expect(await page(id)).toContain('THE ANSWER IN 60 SECONDS');
+  });
+
+  it('unpaid audits never render a report (no free sample report)', async () => {
+    const id = await newAudit('I want to launch a pharmacy platform in Pune for chemists.');
+    const html = await page(id);
+    expect(html).toContain('Audit not paid yet');
+    expect(html).not.toContain('THE ANSWER IN 60 SECONDS');
+  });
+
+  it('verify route allows 60 seconds for generation', () => {
+    expect(verifyModule.maxDuration).toBe(60);
   });
 });

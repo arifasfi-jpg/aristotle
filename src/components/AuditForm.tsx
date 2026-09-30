@@ -45,7 +45,11 @@ export default function AuditForm(){
   const script=await loadRazorpay();if(!script)throw new Error('Razorpay checkout could not load');
   const rz=new (window as any).Razorpay({key:order.keyId,amount:order.amount,currency:order.currency,name:'Aristotle',description:'Venture audit',order_id:order.orderId,handler:async (response:any)=>complete(id,response),prefill:{name:form.name,email:form.email},theme:{color:'#77e2c1'}});rz.open();
  }
- async function complete(id:string,payment:any){setBusy(true);try{await post('/api/payments/verify',{auditId:id,...payment});}catch(e:any){setErr(e.message);setBusy(false);return;}window.location.href=`/audit/${id}`;}
+ async function complete(id:string,payment:any){setBusy(true);
+  const r=await fetch('/api/payments/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({auditId:id,...payment})});
+  // Paid but generation failed / still running → the audit page shows status and a Retry button (no second payment).
+  if(r.ok||r.status===502||r.status===409||r.status===500){window.location.href=`/audit/${id}`;return;}
+  const j=await r.json().catch(()=>({}));setErr(j.error||'Payment verification failed');setBusy(false);}
  function loadRazorpay(){return new Promise<boolean>(resolve=>{if((window as any).Razorpay)return resolve(true);const s=document.createElement('script');s.src='https://checkout.razorpay.com/v1/checkout.js';s.onload=()=>resolve(true);s.onerror=()=>resolve(false);document.body.appendChild(s)})}
  const setFact=(i:number,patch:Partial<Fact>)=>{setFactsOk(false);setFacts(fs=>fs.map((f,j)=>j===i?{...f,...patch}:f));};
 

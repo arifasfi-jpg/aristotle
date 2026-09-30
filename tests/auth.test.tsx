@@ -97,6 +97,8 @@ async function seedVictim() {
   const victimId = ownerOf(victimAuditId);
   // Model a pre-existing production account, which has its email stored on User.
   db.users.get(victimId)!.email = 'arif@example.com';
+  // A real private report: paid and generated (unpaid audits never render a report).
+  Object.assign(db.audits.get(victimAuditId)!, { paymentStatus: 'paid', status: 'completed', report: JSON.stringify({ score: 70 }) });
   return { victimBrowser, victimAuditId, victimId };
 }
 

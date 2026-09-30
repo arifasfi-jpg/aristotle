@@ -2,9 +2,14 @@ import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { getCurrentUser } from '@/lib/session';
 import { runAudit } from '@/lib/ai';
-import { isDemoMode, verifyRazorpaySignature } from '@/lib/payments';
+import Razorpay from 'razorpay';
+import { isDemoMode, razorpayConfigured, verifyRazorpaySignature } from '@/lib/payments';
 import type { Scope } from '@/lib/routing';
 import { getLockedFacts, getScopeRecord, payableError } from '@/lib/audit-meta';
+
+// Tavily research + Gemini generation can take ~40s; without this, a short platform default can kill
+// the function after payment and leave a paid audit with no report.
+export const maxDuration = 60;
 
 export async function POST(req: Request) {
   try {
@@ -56,10 +61,25 @@ export async function POST(req: Request) {
     const founderFacts = gate.legacy ? [] : await getLockedFacts(audit.id);
 
     const alreadyPaid = audit.paymentStatus === 'paid';
+    let reconciledPaymentId: string | undefined;
 
     if (!alreadyPaid) {
-      if (b.demo) {
-        // Demo checkout only when Razorpay is genuinely not configured on the server.
+      const hasCheckoutPayload = Boolean(b.razorpay_order_id || b.razorpay_payment_id || b.razorpay_signature);
+      if (!b.demo && !hasCheckoutPayload) {
+        // Recovery for "paid, but the browser never reported back": ask Razorpay directly whether THIS audit's
+        // order was paid. Nothing from the browser is trusted here.
+        if (!razorpayConfigured() || !audit.paymentRef || !audit.paymentRef.startsWith('order_')) {
+          return NextResponse.json({ error: 'No payment was found for this audit.' }, { status: 402 });
+        }
+        const rp = new Razorpay({ key_id: process.env.RAZORPAY_KEY_ID!, key_secret: process.env.RAZORPAY_KEY_SECRET! });
+        const order = await rp.orders.fetch(audit.paymentRef);
+        if (order.status !== 'paid' || Number(order.amount) !== audit.pricePaise || order.receipt !== audit.id) {
+          return NextResponse.json({ error: 'We have not received a successful payment for this audit yet.' }, { status: 402 });
+        }
+        const payments = await rp.orders.fetchPayments(audit.paymentRef);
+        reconciledPaymentId = (payments.items as { id: string; status: string }[]).find((p) => p.status === 'captured')?.id;
+      } else if (b.demo) {
+        // Demo checkout only when DEMO_MODE=true outside production (see isDemoMode).
         if (!isDemoMode()) {
           return NextResponse.json(
             { error: 'Payment verification failed' },
@@ -108,7 +128,7 @@ export async function POST(req: Request) {
       data: {
         status: 'generating',
         paymentStatus: 'paid',
-        paymentRef: alreadyPaid ? audit.paymentRef : (b.razorpay_payment_id || audit.paymentRef),
+        paymentRef: alreadyPaid ? audit.paymentRef : (reconciledPaymentId || b.razorpay_payment_id || audit.paymentRef),
       },
     });
 

@@ -5,7 +5,7 @@ import { runAudit } from '@/lib/ai';
 import Razorpay from 'razorpay';
 import { isDemoMode, razorpayConfigured, verifyRazorpaySignature } from '@/lib/payments';
 import type { Scope } from '@/lib/routing';
-import { getLockedFacts, getScopeRecord, payableError } from '@/lib/audit-meta';
+import { getLockedFacts, getScopeRecord, payableError, saveResearch } from '@/lib/audit-meta';
 
 // Tavily research + Gemini generation can take ~40s; without this, a short platform default can kill
 // the function after payment and leave a paid audit with no report.
@@ -184,6 +184,8 @@ export async function POST(req: Request) {
           status: 'completed',
         },
       });
+
+      if (result.research) await saveResearch(audit.id, result.research);
 
       await db.projectFile.upsert({
         where: {

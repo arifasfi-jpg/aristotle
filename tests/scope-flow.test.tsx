@@ -344,3 +344,37 @@ describe('Razorpay TEST/LIVE flow and recovery', () => {
     expect(verifyModule.maxDuration).toBe(60);
   });
 });
+
+describe('Evidence layer end to end', () => {
+  it('research sources are saved, exported, and cited in the decision memo on the report page', async () => {
+    const { toResearchRecord } = await import('@/lib/evidence');
+    const { deterministicAudit } = await import('@/lib/audit');
+    const research = toResearchRecord([{ query: 'pharmacy saas pricing india', results: [{ title: 'Pharmacy SaaS pricing', url: 'https://example.org/pricing', content: 'Tools cost ₹999–₹2,499 a month' }] }]);
+    runAudit.mockImplementationOnce(async (input: Row) => {
+      const base = deterministicAudit(input as any);
+      return { research, provider: 'test', pricing: { computeInr: 1, marginInr: 0.1 }, report: { ...base, decisionMemo: { ...base.decisionMemo!, criticalAssumptions: [{ ...base.decisionMemo!.criticalAssumptions[0], evidenceStatus: 'PARTIAL', evidence: 'Competing tools charge ₹999–₹2,499', evidenceIds: ['S1'] }, ...base.decisionMemo!.criticalAssumptions.slice(1)] }, evidence: [{ claim: 'Comparable tools charge ₹999–₹2,499 a month.', type: 'FACT', sourceIds: ['S1'], confidence: 'MEDIUM', validation: 'Check vendor pricing pages', verified: true }] } };
+    });
+    const id = await newAudit('I want to launch a pharmacy platform in Pune for chemists.');
+    await scope(id, { action: 'suggest' });
+    await scope(id, { action: 'confirm', scope: 'NEW_IDEA', facts: [] });
+    await order(id); await verify(post({ auditId: id, demo: true }));
+    expect(JSON.parse(db.files.find((f) => f.auditId === id && f.path === 'research.json')!.content).sources[0]).toMatchObject({ id: 'S1', url: 'https://example.org/pricing' });
+    const html = await page(id);
+    expect(html).toContain('>The decision</h2>');
+    expect(html).toContain('Partly supported');
+    expect(html).toContain('href="https://example.org/pricing"');
+    expect(html).toContain('Evidence register');
+    expect(html).toContain('Sourced fact');
+    const zip = await JSZip.loadAsync(await (await exportAudit(new Request('http://x'), ctx(id))).arrayBuffer());
+    expect(zip.file('project/research.json')).toBeTruthy();
+  });
+
+  it('older reports without an evidence layer do not get a template decision memo', async () => {
+    const id = await newAudit('I want to launch a pharmacy platform in Pune for chemists.');
+    Object.assign(db.audits.get(id)!, { paymentStatus: 'paid', status: 'completed', report: JSON.stringify({ score: 70, oneLineVerdict: 'Old report' }) });
+    const html = await page(id);
+    expect(html).toContain('Old report');
+    expect(html).not.toContain('>The decision</h2>');
+    expect(html).not.toContain('No research was performed');
+  });
+});

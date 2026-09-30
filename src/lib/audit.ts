@@ -1,3 +1,4 @@
+import type { DecisionMemo, EvidenceClaim } from './evidence';
 import type { FactConcept, FounderFact } from './founder-facts';
 export type Sector = 'Quick Commerce' | 'D2C / Consumer' | 'B2B SaaS' | 'Digital Agency' | 'Fintech' | 'Healthtech' | 'Edtech' | 'Marketplace' | 'Manufacturing' | 'Other';
 export type ReportLanguage = 'Simple English' | 'Hinglish';
@@ -26,7 +27,10 @@ export type AuditReport = {
   experiments: { hypothesis: string; test: string; metric: string; passThreshold: string; failThreshold: string }[];
   operatingModel: string[];
   technologyBuild: { mvp: string[]; avoidBuilding: string[]; estimatedBuildApproach: string };
-  regulatory: { name: string; status: 'Likely' | 'Conditional' | 'Low signal'; rationale: string; action: string; source: string }[];
+  regulatory: { name: string; status: 'Likely' | 'Conditional' | 'Low signal'; rationale: string; action: string; source: string; trigger?: string }[];
+  // Evidence layer (optional: older stored reports do not have these)
+  decisionMemo?: DecisionMemo;
+  evidence?: EvidenceClaim[];
   vulnerabilities: { risk: string; probability: 'Low' | 'Medium' | 'High'; impact: 'Low' | 'Medium' | 'High'; whyItMatters: string; mitigation: string }[];
   goToMarket: string[];
   thirtyDayPlan: { week: string; objective: string; actions: string[]; successMetric: string }[];
@@ -177,7 +181,25 @@ export function deterministicAudit(input: { idea: string; sector: Sector; stage?
       avoidBuilding: ['Complex admin panels before demand', 'Large mobile apps before repeat usage', 'Custom AI models without proven volume', 'Multi-city/multi-segment workflows on day one'],
       estimatedBuildApproach: simple ? 'Start with no-code/manual operations where possible; build only the workflow that customers repeatedly use.' : 'Start with manual/no-code operations where possible; build only the workflow customers repeatedly use.'
     },
-    regulatory,
+    // Only regulation triggered by this business model; nothing is listed "by default".
+    regulatory: regulatory
+      .filter((r) => r.name === 'GST' || (r.name === 'BIS' && bis) || (r.name === 'DPDP' && data) || (r.name === 'Sector licensing' && money))
+      .map((r) => ({ ...r, status: r.name === 'GST' ? ('Conditional' as const) : r.status, trigger: r.name === 'GST' ? 'Taxable sales of goods or services (registration depends on turnover and supply type)' : r.name === 'BIS' ? 'Selling a product category that may be under a BIS quality control order' : r.name === 'DPDP' ? 'Collecting and processing customers’ digital personal data' : 'Handling money, credit, payments or insurance for customers' })),
+    // Template fallback (Demo Mode only): no research was done, so every critical assumption is UNKNOWN.
+    decisionMemo: {
+      decisionQuestion: `Is there enough evidence to invest more time and money in this ${input.sector} business?`,
+      criticalAssumptions: [
+        { assumption: 'The target customer has this problem often enough to pay to solve it.', whyItMatters: 'Without a painful, frequent problem there is no business.', evidenceStatus: 'UNKNOWN' as const, evidence: 'No research was performed for this report.', evidenceIds: [], cheapestTest: 'Ask 10 target customers for a deposit or signed commitment.', experimentIndex: 1 },
+        { assumption: 'Customers will accept the price you plan to charge.', whyItMatters: 'Price sets whether each sale makes or loses money.', evidenceStatus: 'UNKNOWN' as const, evidence: 'No research was performed for this report.', evidenceIds: [], cheapestTest: 'State the price in 10 sales conversations and record objections.', experimentIndex: 2 },
+        { assumption: 'Each customer earns more than it costs to win and serve them.', whyItMatters: 'Growth multiplies losses if unit economics are negative.', evidenceStatus: 'UNKNOWN' as const, evidence: 'No research was performed for this report.', evidenceIds: [], cheapestTest: 'Track revenue, variable cost and acquisition cost for the first 5 customers.', experimentIndex: 4 },
+      ],
+      proceedIf: ['At least 3 of 10 target customers pay or commit.', 'Contribution per customer is positive after variable costs.'],
+      changeModelIf: ['Customers like the idea but will not pay.', 'Acquisition cost repeatedly exceeds contribution per customer.'],
+      evidenceStillRequired: ['Real customer willingness to pay', 'Actual variable cost per customer', 'A repeatable acquisition channel'],
+    },
+    evidence: [
+      { claim: 'All market, customer and economics statements in this report are template assumptions, not researched facts.', type: 'ASSUMPTION' as const, sourceIds: [], confidence: 'LOW' as const, validation: 'Run the experiments in section 9.' },
+    ],
     vulnerabilities,
     goToMarket: [
       simple ? 'One ICP choose karein; everyone ko target mat karein.' : 'Choose one ICP; do not target everyone.',

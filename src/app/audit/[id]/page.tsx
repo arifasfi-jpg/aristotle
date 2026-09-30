@@ -4,13 +4,18 @@ import { db } from '@/lib/db';
 import { getCurrentUser } from '@/lib/session';
 import { AuditReport, deterministicAudit } from '@/lib/audit';
 import RetryAnalysis from '@/components/RetryAnalysis';
-import { getLockedFacts, getScopeRecord } from '@/lib/audit-meta';
+import { getLockedFacts, getResearch, getScopeRecord } from '@/lib/audit-meta';
+import { evidenceSummary, type EvidenceClaim, type DecisionMemo } from '@/lib/evidence';
 import { CONCEPT_LABEL, COUNT_CONCEPTS, TIMEFRAME_LABEL, formatFactValue, type FactConcept } from '@/lib/founder-facts';
 import { OUT_OF_SCOPE_MESSAGES, SCOPE_LABEL } from '@/lib/routing';
 
 const money=(n:number)=>`₹${Math.round(n).toLocaleString('en-IN')}`;
 // Format by what the number measures: counts never get ₹, margins are %, money gets ₹.
 const fmt=(x:{unit?:string;concept?:string},n:number)=>{const u=x.unit||'';if(x.concept==='margin'||u.includes('%'))return `${Math.round(n*100)/100}%`;if(COUNT_CONCEPTS.includes(x.concept as FactConcept)||x.concept==='payback'||(!u.includes('₹')&&/(units|orders|customers|months|count|meals|packs|pieces|pharmacies|stores|\/order)/i.test(u)))return Math.round(n*100)/100===Math.round(n)?Math.round(n).toLocaleString('en-IN'):(Math.round(n*100)/100).toLocaleString('en-IN');return money(n);};
+const STATUS_STYLE:Record<string,string>={SUPPORTED:'border-[#2c6b57] text-[#77e2c1]',PARTIAL:'border-[#5a4a2d] text-[#ffcf70]',UNKNOWN:'border-[#3a4657] text-[#93a0b5]',CONTRADICTED:'border-[#6b2d2d] text-[#ff9f9f]'};
+const STATUS_LABEL:Record<string,string>={SUPPORTED:'Supported by evidence',PARTIAL:'Partly supported',UNKNOWN:'Unknown — needs testing',CONTRADICTED:'Evidence contradicts'};
+const CLAIM_STYLE:Record<string,string>={FACT:'border-[#2c6b57] text-[#77e2c1]',FOUNDER:'border-[#2c6b57] text-[#b6f0dc]',CALCULATION:'border-[#2d4a6b] text-[#8fb8ff]',ASSUMPTION:'border-[#3a4657] text-[#93a0b5]',HYPOTHESIS:'border-[#5a2d4a] text-[#ff9fd0]',INFERENCE:'border-[#5a4a2d] text-[#ffcf70]'};
+const CLAIM_LABEL:Record<string,string>={FACT:'Sourced fact',FOUNDER:'Founder-stated',CALCULATION:'Calculation',ASSUMPTION:'Assumption',HYPOTHESIS:'Hypothesis',INFERENCE:'Inference'};
 const PROV_STYLE:Record<string,string>={FOUNDER_STATED:'border-[#2c6b57] text-[#77e2c1]',CALCULATED:'border-[#2d4a6b] text-[#8fb8ff]',EXTERNAL:'border-[#5a4a2d] text-[#ffcf70]',ASSUMPTION:'border-[#3a4657] text-[#93a0b5]',HYPOTHESIS:'border-[#5a2d4a] text-[#ff9fd0]'};
 
 export default async function AuditPage({params}:{params:Promise<{id:string}>}){
@@ -36,7 +41,8 @@ export default async function AuditPage({params}:{params:Promise<{id:string}>}){
  const arr=<T,>(v:unknown,fallback:T[])=>Array.isArray(v)?v as T[]:fallback;
  // num: use the value only if it is a finite number, otherwise use the fallback
  const num=(v:unknown,fallback:number)=>typeof v==='number'&&isFinite(v)?v:fallback;
- const [facts,scopeRec]=await Promise.all([getLockedFacts(audit.id),getScopeRecord(audit.id)]); const scope=scopeRec?.confirmed?.scope;
+ const [facts,scopeRec,research]=await Promise.all([getLockedFacts(audit.id),getScopeRecord(audit.id),getResearch(audit.id)]);
+ const srcById=new Map((research?.sources||[]).map(x=>[x.id,x])); const scope=scopeRec?.confirmed?.scope;
  const base=deterministicAudit({idea:audit.idea,sector:audit.sector as any,stage:audit.stage||undefined,geography:audit.geography||'India',language:(audit.reportLanguage as any)||'Simple English',scope,founderFacts:facts});
  // Merge top-level scalar fields
  const rawBM=obj(raw.businessModel); const rawTB=obj(raw.technologyBuild); const rawKS=obj(raw.killOrScale);
@@ -96,11 +102,30 @@ export default async function AuditPage({params}:{params:Promise<{id:string}>}){
   assumptions:arr(raw.assumptions,base.assumptions),
   nextSteps:arr(raw.nextSteps,base.nextSteps),
  } as AuditReport;
+ // Evidence layer: never fall back to template content for older reports that pre-date it.
+ const memo=(raw.decisionMemo&&Array.isArray((raw.decisionMemo as DecisionMemo).criticalAssumptions))?raw.decisionMemo as DecisionMemo:undefined;
+ const evidence:EvidenceClaim[]=Array.isArray(raw.evidence)?raw.evidence as EvidenceClaim[]:[];
+ const evSum=evidenceSummary(evidence);
+ const cite=(ids:string[])=>ids.map(id=>{const src=srcById.get(id);const f=facts.find(x=>x.id===id);return src?<a key={id} href={src.url} target="_blank" rel="noreferrer" className="mr-2 inline-flex items-center gap-1 text-xs text-[#77e2c1] underline" title={src.title}>[{id}] {src.title.slice(0,48)}</a>:f?<span key={id} className="mr-2 text-xs text-[#77e2c1]">[{id}] founder figure</span>:null;});
  return <main className="mx-auto max-w-6xl px-6 py-10 pb-20">
   <div className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between"><div><div className="text-xs uppercase tracking-[.2em] text-[#77e2c1]">ARISTOTLE · FOUNDER DECISION MEMO · {audit.sector}{scope&&scope!=='OUT_OF_SCOPE'?<> · {SCOPE_LABEL[scope]}</>:null}</div><h1 className="mt-3 max-w-4xl text-4xl font-semibold tracking-tight md:text-5xl">{audit.idea}</h1><p className="mt-3 text-sm text-[#7f8da3]">Prepared {audit.createdAt.toLocaleString('en-IN')} · {audit.reportLanguage}</p></div><a href={`/api/audits/${audit.id}/export`} className="inline-flex items-center justify-center gap-2 rounded-xl border border-[#3a4657] px-4 py-3 font-medium hover:border-[#77e2c1]"><ArrowDownToLine size={17}/> Lock-and-Barrel Export</a></div>
 
-  <section className="mt-8 rounded-3xl border border-[#263446] bg-[#0d121a] p-7 md:p-9"><div className="grid gap-8 md:grid-cols-[1.5fr_.5fr] md:items-center"><div><div className="text-xs font-semibold uppercase tracking-[.18em] text-[#77e2c1]">THE ANSWER IN 60 SECONDS</div><h2 className="mt-3 text-2xl font-semibold md:text-3xl">{r.oneLineVerdict}</h2><p className="mt-5 max-w-3xl text-[15px] leading-7 text-[#c2cad6]">{r.executiveSummary}</p></div><div className="rounded-2xl border border-[#2a394b] bg-[#0a0f16] p-5 text-center"><div className="text-xs uppercase tracking-wider text-[#7f8da3]">Screening score</div><div className="mt-2 text-6xl font-semibold text-[#77e2c1]">{Math.round(r.score)}<span className="text-2xl text-[#536176]">/100</span></div><div className="mt-2 text-xs leading-5 text-[#718096]">A screening signal, not an investment recommendation.</div></div></div></section>
+  <section className="mt-8 rounded-3xl border border-[#263446] bg-[#0d121a] p-7 md:p-9"><div className="grid gap-8 md:grid-cols-[1.5fr_.5fr] md:items-center"><div><div className="text-xs font-semibold uppercase tracking-[.18em] text-[#77e2c1]">THE ANSWER IN 60 SECONDS</div><h2 className="mt-3 text-2xl font-semibold md:text-3xl">{r.oneLineVerdict}</h2><p className="mt-5 max-w-3xl text-[15px] leading-7 text-[#c2cad6]">{r.executiveSummary}</p></div><div className="rounded-2xl border border-[#2a394b] bg-[#0a0f16] p-5 text-center"><div className="text-xs uppercase tracking-wider text-[#7f8da3]">Screening signal</div><div className="mt-2 text-6xl font-semibold text-[#77e2c1]">{Math.round(r.score)}<span className="text-2xl text-[#536176]">/100</span></div><div className="mt-2 text-xs leading-5 text-[#718096]">Not a prediction or recommendation. The decision depends on the evidence and assumptions below.</div></div></div></section>
 
+  {memo&&<Section title="The decision">
+   <p className="-mt-2 mb-5 text-[15px] text-[#c2cad6]">{memo.decisionQuestion}</p>
+   <div className="text-xs font-semibold uppercase tracking-[.18em] text-[#77e2c1]">The {memo.criticalAssumptions.length} assumptions that decide this</div>
+   <div className="mt-4 grid gap-3 md:grid-cols-3">{memo.criticalAssumptions.map((a,i)=><div key={i} className="rounded-2xl border border-[#202938] bg-[#0a0f16] p-5">
+    <span className={`inline-block rounded-full border px-2.5 py-0.5 text-[11px] uppercase tracking-wider ${STATUS_STYLE[a.evidenceStatus]||STATUS_STYLE.UNKNOWN}`}>{STATUS_LABEL[a.evidenceStatus]||'Unknown'}</span>
+    <h3 className="mt-3 font-medium leading-6">{a.assumption}</h3>
+    <p className="mt-2 text-sm leading-6 text-[#8e9bae]">{a.whyItMatters}</p>
+    <p className="mt-3 text-sm leading-6 text-[#c0c8d5]"><strong>Evidence so far:</strong> {a.evidence}</p>
+    {a.evidenceIds.length>0&&<div className="mt-2">{cite(a.evidenceIds)}</div>}
+    {a.note&&<p className="mt-2 text-xs text-[#ffcf70]">{a.note}</p>}
+    <p className="mt-3 text-sm leading-6 text-[#c0c8d5]"><strong>Cheapest test:</strong> {a.cheapestTest}{a.experimentIndex?` (Experiment ${a.experimentIndex})`:''}</p>
+   </div>)}</div>
+   <div className="mt-4 grid gap-4 md:grid-cols-3"><Mini title="Proceed if" items={memo.proceedIf}/><Mini title="Change the model if" items={memo.changeModelIf}/><Mini title="Evidence still required" items={memo.evidenceStillRequired}/></div>
+  </Section>}
   <div className="mt-4 grid gap-4 md:grid-cols-3">
    <InfoCard icon={<Target size={18}/>} title="What this business is" text={r.whatThisBusinessIs}/>
    <InfoCard icon={<TrendingUp size={18}/>} title="Why it could work" items={r.whyItCouldWork}/>
@@ -115,7 +140,7 @@ export default async function AuditPage({params}:{params:Promise<{id:string}>}){
 
   <Section title="4. How to build it"><div className="grid gap-4 md:grid-cols-3"><Mini title="MVP — build first" items={r.technologyBuild.mvp}/><Mini title="Do not build yet" items={r.technologyBuild.avoidBuilding}/><Mini title="Operating model" items={r.operatingModel}/></div><div className="mt-4 rounded-2xl border border-[#202938] bg-[#0a0f16] p-5"><div className="text-xs uppercase tracking-wider text-[#718096]">Build principle</div><p className="mt-2 text-sm leading-6 text-[#c0c8d5]">{r.technologyBuild.estimatedBuildApproach}</p></div></Section>
 
-  <Section title="5. India regulatory radar"><div className="grid gap-3 md:grid-cols-2">{r.regulatory.map(x=><div key={x.name} className="rounded-2xl border border-[#202938] bg-[#0a0f16] p-5"><div className="flex items-center justify-between"><div className="font-medium">{x.name}</div><span className="rounded-full border border-[#2d3b4c] px-2.5 py-1 text-xs text-[#77e2c1]">{x.status}</span></div><p className="mt-3 text-sm leading-6 text-[#a0adbf]">{x.rationale}</p><p className="mt-3 text-sm leading-6 text-[#d1d7e0]"><strong>Do this:</strong> {x.action}</p><a className="mt-4 inline-flex items-center gap-1 text-xs text-[#77e2c1]" href={x.source} target="_blank" rel="noreferrer">Official source <ExternalLink size={12}/></a></div>)}</div></Section>
+  <Section title="5. India regulatory radar"><div className="grid gap-3 md:grid-cols-2">{r.regulatory.map(x=><div key={x.name} className="rounded-2xl border border-[#202938] bg-[#0a0f16] p-5"><div className="flex items-center justify-between"><div className="font-medium">{x.name}</div><span className="rounded-full border border-[#2d3b4c] px-2.5 py-1 text-xs text-[#77e2c1]">{x.status}</span></div><p className="mt-3 text-sm leading-6 text-[#a0adbf]">{x.rationale}</p>{x.trigger&&<p className="mt-2 text-xs leading-5 text-[#8e9bae]"><strong>Triggered by:</strong> {x.trigger}</p>}<p className="mt-3 text-sm leading-6 text-[#d1d7e0]"><strong>Do this:</strong> {x.action}</p>{x.source?<a className="mt-4 inline-flex items-center gap-1 text-xs text-[#77e2c1]" href={x.source} target="_blank" rel="noreferrer">Official source <ExternalLink size={12}/></a>:<span className="mt-4 inline-block text-xs text-[#718096]">No verified source — confirm with a professional.</span>}</div>)}</div></Section>
 
   <Section title="6. Vulnerability matrix"><div className="space-y-3">{r.vulnerabilities.map(x=><div key={x.risk} className="grid gap-4 rounded-2xl border border-[#202938] bg-[#0a0f16] p-5 md:grid-cols-[1.1fr_.35fr_1.6fr]"><div><div className="font-medium">{x.risk}</div><p className="mt-2 text-sm leading-6 text-[#8e9bae]">{x.whyItMatters}</p></div><div className="text-xs leading-6 text-[#ffcf70]">{x.probability} probability<br/>{x.impact} impact</div><div className="text-sm leading-6 text-[#c0c8d5]"><strong>Mitigation:</strong> {x.mitigation}</div></div>)}</div></Section>
 
@@ -127,6 +152,10 @@ export default async function AuditPage({params}:{params:Promise<{id:string}>}){
 
   <Section title="9. Experiments to run"><p className="mb-5 text-sm text-[#7f8da3]">Low-cost tests to validate the most important assumptions before committing to heavy investment.</p><div className="space-y-4">{r.experiments.map((x,i)=><div key={x.hypothesis} className="rounded-2xl border border-[#202938] bg-[#0a0f16] p-5"><div className="flex items-center gap-2 mb-3"><Target size={15} className="shrink-0 text-[#77e2c1]"/><span className="text-xs font-semibold uppercase tracking-wider text-[#77e2c1]">Experiment {i+1}</span></div><div className="grid gap-3 md:grid-cols-[1fr_1fr]"><div><div className="text-xs uppercase tracking-wider text-[#718096] mb-1">Hypothesis</div><p className="text-sm leading-6 text-[#c0c8d5]">{x.hypothesis}</p></div><div><div className="text-xs uppercase tracking-wider text-[#718096] mb-1">Test</div><p className="text-sm leading-6 text-[#c0c8d5]">{x.test}</p></div><div><div className="text-xs uppercase tracking-wider text-[#718096] mb-1">Metric</div><p className="text-sm leading-6 text-[#c0c8d5]">{x.metric}</p></div><div className="grid grid-cols-2 gap-3"><div><div className="text-xs uppercase tracking-wider text-[#4caf7d] mb-1">Pass</div><p className="text-sm leading-6 text-[#c0c8d5]">{x.passThreshold}</p></div><div><div className="text-xs uppercase tracking-wider text-[#ffcf70] mb-1">Fail</div><p className="text-sm leading-6 text-[#c0c8d5]">{x.failThreshold}</p></div></div></div></div>)}</div></Section>
 
+  {evidence.length>0&&<Section title="Evidence register"><p className="mb-4 text-sm text-[#7f8da3]">What this report relies on, and how solid each part is. Sources are checked by Aristotle: a claim is only marked as fact if it cites a real research source.</p>
+   <div className="mb-5 flex flex-wrap gap-2">{(Object.entries(evSum) as [string,number][]).filter(([,n])=>n>0).map(([t,n])=><span key={t} className={`rounded-full border px-3 py-1 text-xs ${CLAIM_STYLE[t]}`}>{n} {CLAIM_LABEL[t]}</span>)}</div>
+   <div className="space-y-3">{evidence.map((e,i)=><div key={i} className="rounded-2xl border border-[#202938] bg-[#0a0f16] p-4"><div className="flex flex-wrap items-center gap-2"><span className={`rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wider ${CLAIM_STYLE[e.type]}`}>{CLAIM_LABEL[e.type]}</span><span className="text-[11px] uppercase tracking-wider text-[#718096]">{e.confidence} confidence</span></div><p className="mt-2 text-sm leading-6 text-[#d1d7e0]">{e.claim}</p>{e.sourceIds.length>0&&<div className="mt-1">{cite(e.sourceIds)}</div>}{e.note&&<p className="mt-1 text-xs text-[#ffcf70]">{e.note}</p>}{e.validation&&<p className="mt-1 text-xs text-[#8e9bae]"><strong>How to check:</strong> {e.validation}</p>}</div>)}</div>
+  </Section>}
   <div className="mt-4 grid gap-4 md:grid-cols-2"><Section title="Immediate next steps"><ul className="space-y-3">{r.nextSteps.map(x=><li key={x} className="flex gap-2 text-sm leading-6 text-[#c0c8d5]"><CheckCircle2 size={16} className="mt-1 shrink-0 text-[#77e2c1]"/>{x}</li>)}</ul></Section><Section title="Assumptions"><ul className="space-y-3">{r.assumptions.map(x=><li key={x} className="text-sm leading-6 text-[#8e9bae]">• {x}</li>)}</ul></Section></div>
 
   <div className="mt-6 grid gap-4 md:grid-cols-[1fr_.8fr]"><div className="rounded-2xl border border-[#6b4d17] bg-[#1a1408] p-5 text-sm leading-6 text-[#d6bd83]"><ShieldAlert size={18} className="mb-2"/>Regulatory screening is not legal or tax advice. Requirements can change and may depend on facts not captured by the intake.</div><div className="rounded-2xl border border-[#202938] bg-[#0d121a] p-5"><div className="text-xs uppercase tracking-wider text-[#718096]">Transparent build ledger</div><div className="mt-4 space-y-3 text-sm">{[['Audit fee','₹99.00'],['Base compute / tokens',`₹${(audit.computePaise/100).toFixed(2)}`],['Platform margin (10%)',`₹${(audit.marginPaise/100).toFixed(2)}`]].map(([a,b])=><div key={a} className="flex justify-between border-b border-[#202938] pb-3"><span className="text-[#7f8da3]">{a}</span><span>{b}</span></div>)}</div></div></div>

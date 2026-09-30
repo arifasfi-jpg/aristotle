@@ -6,10 +6,12 @@
 // ---------------------------------------------------------------------------
 import { db } from './db';
 import type { FounderFact } from './founder-facts';
+import type { ResearchRecord } from './evidence';
 import { PAYABLE_SCOPES, type ClassifierResult, type OutOfScopeCategory, type Scope } from './routing';
 
 export const SCOPE_FILE = 'scope.json';
 export const FACTS_FILE = 'founder-facts.json';
+export const RESEARCH_FILE = 'research.json';
 
 export type ScopeRecord = {
   version: 1;
@@ -45,6 +47,9 @@ async function writeJson(auditId: string, path: string, value: unknown) {
 export const getScopeRecord = (auditId: string) => readJson<ScopeRecord>(auditId, SCOPE_FILE);
 export const saveScopeRecord = (auditId: string, rec: ScopeRecord) => writeJson(auditId, SCOPE_FILE, rec);
 export const saveFacts = (auditId: string, rec: FactsRecord) => writeJson(auditId, FACTS_FILE, rec);
+/** Research sources (S1, S2, …) the report cites. Portable and exported with the audit. */
+export const saveResearch = (auditId: string, rec: ResearchRecord) => writeJson(auditId, RESEARCH_FILE, rec);
+export const getResearch = (auditId: string) => readJson<ResearchRecord>(auditId, RESEARCH_FILE);
 
 /** Only founder-confirmed, locked facts. */
 export async function getLockedFacts(auditId: string): Promise<FounderFact[]> {

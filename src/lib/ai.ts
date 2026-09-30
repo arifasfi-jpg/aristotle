@@ -3,6 +3,8 @@ import { estimateCompute } from './pricing';
 import { buildFounderFactsBlock, FACT_CONCEPTS, type FounderFact } from './founder-facts';
 import { validateReport } from './report-validation';
 import type { Scope } from './routing';
+import { toResearchRecord, validateEvidence, type ResearchRecord } from './evidence';
+import { isDemoMode } from './payments';
 
 type AuditInput = {
   idea: string;
@@ -23,6 +25,33 @@ SCOPE: EXISTING BUSINESS / GROWTH PLAN (founder-confirmed)
 The founder confirmed this business already operates. Treat it as an operating business, not an idea.
 Use the CURRENT founder facts as the baseline and focus unitEconomics, experiments, thirtyDayPlan and
 killOrScale on moving from the current numbers to the stated targets. Keep exactly the same JSON contract.
+`;
+
+const EVIDENCE_BLOCK = `
+════════════════════════════════════════════════════════════════════════
+EVIDENCE DISCIPLINE (Aristotle's core rule: evidence over confidence)
+════════════════════════════════════════════════════════════════════════
+Research sources below are labelled [S1], [S2], … Founder facts are labelled F1, F2, …
+Cite ONLY these ids. Never invent a source, statistic, competitor price, market size, regulation or URL.
+
+decisionMemo
+  decisionQuestion: the single decision the founder faces, in one plain sentence.
+  criticalAssumptions: EXACTLY 3 — the assumptions that decide whether this business works (demand, price /
+    willingness to pay, unit economics, channel, regulation…). For each:
+    evidenceStatus: SUPPORTED (cited evidence supports it) | PARTIAL | UNKNOWN (no evidence yet) | CONTRADICTED.
+    evidence: what the cited evidence actually says, or "No evidence yet".
+    evidenceIds: the S#/F# ids used. SUPPORTED/PARTIAL/CONTRADICTED require at least one id.
+    cheapestTest: the cheapest, fastest way to find out; experimentIndex: the matching experiment (1-5).
+  proceedIf / changeModelIf: measurable conditions (numbers, thresholds, deadlines).
+  evidenceStillRequired: what is unknown and must be validated before serious investment.
+
+evidence (6–12 items): the key claims this report relies on, each tagged:
+  FACT (from a cited source — sourceIds required) | FOUNDER (founder-confirmed fact — cite F#) |
+  CALCULATION (derived from facts) | ASSUMPTION (your estimate) | HYPOTHESIS (must be tested) |
+  INFERENCE (reasoned from evidence, not directly stated). confidence: HIGH | MEDIUM | LOW.
+  validation: how the founder can check it.
+If research is thin, say so. "Unknown" is an acceptable, honest answer.
+Challenge the founder: if an assumption looks unrealistic or the economics do not work, say why and show the math.
 `;
 
 const PROVENANCE_BLOCK = `
@@ -104,6 +133,46 @@ function cleanJson(text: string): string {
 const AUDIT_RESPONSE_SCHEMA = {
   type: 'object',
   properties: {
+    decisionMemo: {
+      type: 'object',
+      properties: {
+        decisionQuestion: { type: 'string' },
+        criticalAssumptions: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              assumption: { type: 'string' },
+              whyItMatters: { type: 'string' },
+              evidenceStatus: { type: 'string', enum: ['SUPPORTED', 'PARTIAL', 'UNKNOWN', 'CONTRADICTED'] },
+              evidence: { type: 'string' },
+              evidenceIds: { type: 'array', items: { type: 'string' } },
+              cheapestTest: { type: 'string' },
+              experimentIndex: { type: 'number' },
+            },
+            required: ['assumption', 'whyItMatters', 'evidenceStatus', 'evidence', 'evidenceIds', 'cheapestTest', 'experimentIndex'],
+          },
+        },
+        proceedIf: { type: 'array', items: { type: 'string' } },
+        changeModelIf: { type: 'array', items: { type: 'string' } },
+        evidenceStillRequired: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['decisionQuestion', 'criticalAssumptions', 'proceedIf', 'changeModelIf', 'evidenceStillRequired'],
+    },
+    evidence: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          claim: { type: 'string' },
+          type: { type: 'string', enum: ['FACT', 'FOUNDER', 'CALCULATION', 'ASSUMPTION', 'HYPOTHESIS', 'INFERENCE'] },
+          sourceIds: { type: 'array', items: { type: 'string' } },
+          confidence: { type: 'string', enum: ['HIGH', 'MEDIUM', 'LOW'] },
+          validation: { type: 'string' },
+        },
+        required: ['claim', 'type', 'sourceIds', 'confidence', 'validation'],
+      },
+    },
     executiveSummary: { type: 'string' },
     score: { type: 'number' },
     verdict: { type: 'string' },
@@ -195,8 +264,9 @@ const AUDIT_RESPONSE_SCHEMA = {
           rationale: { type: 'string' },
           action: { type: 'string' },
           source: { type: 'string' },
+          trigger: { type: 'string' },
         },
-        required: ['name', 'status', 'rationale', 'action', 'source'],
+        required: ['name', 'status', 'rationale', 'action', 'source', 'trigger'],
       },
     },
     vulnerabilities: {
@@ -243,6 +313,7 @@ const AUDIT_RESPONSE_SCHEMA = {
     'whyItCouldWork', 'whatMustBeTrue', 'customer', 'businessModel', 'marketView',
     'unitEconomics', 'experiments', 'operatingModel', 'technologyBuild', 'regulatory',
     'vulnerabilities', 'goToMarket', 'thirtyDayPlan', 'killOrScale', 'assumptions', 'nextSteps',
+    'decisionMemo', 'evidence',
   ],
 };
 
@@ -259,7 +330,7 @@ function buildPrompt(input: AuditInput, research: string): string {
 You produce a paid founder decision memo for a specific business idea.
 
 LANGUAGE: ${lang}
-${input.scope === 'GROWTH_PLAN' ? GROWTH_PLAN_BLOCK : ''}${buildFounderFactsBlock(input.founderFacts)}${PROVENANCE_BLOCK}
+${input.scope === 'GROWTH_PLAN' ? GROWTH_PLAN_BLOCK : ''}${buildFounderFactsBlock(input.founderFacts)}${PROVENANCE_BLOCK}${EVIDENCE_BLOCK}
 ════════════════════════════════════════════════════════════════════════
 OUTPUT CONTRACT
 ════════════════════════════════════════════════════════════════════════
@@ -462,8 +533,9 @@ technologyBuild.estimatedBuildApproach
 
 regulatory
   ONLY include regulations triggered by the actual operating model.
-  For each: name, status ("Likely"|"Conditional"|"Low signal"), rationale (what activity triggers it),
-  action, source (real URL — use regulator homepage if uncertain).
+  For each: name, status ("Likely"|"Conditional"|"Low signal"), rationale, trigger (the specific activity in
+  THIS business that triggers it), action, source (a researched URL [S#] or the official regulator's .gov.in /
+  regulator homepage; leave empty if unsure — unverifiable links are removed).
   Do NOT default-include GST/MSME/DPDP/BIS/RBI/SEBI/IRDAI.
   Say "Requires legal verification." where needed.
 
@@ -518,13 +590,18 @@ export async function runAudit(input: AuditInput) {
   const tavilyKey = process.env.TAVILY_API_KEY;
 
   if (!geminiKey || !tavilyKey) {
+    // A paying founder must never receive a template dressed up as research. Outside Demo Mode this is a
+    // failure (the audit stays paid and can be retried once the engine is configured).
+    if (!isDemoMode()) throw new Error('AI_ENGINE_NOT_CONFIGURED: research or generation credentials are missing');
     return {
-      report: validateReport(fallback, input.founderFacts).report,
+      research: null as ResearchRecord | null,
+      report: validateEvidence(validateReport(fallback, input.founderFacts).report, null, input.founderFacts).report,
       pricing: estimateCompute(0, 0),
       provider: 'deterministic-no-key',
     };
   }
 
+  let researchRecord: ResearchRecord | null = null;
   try {
     console.log(JSON.stringify({
       event: 'aristotle_audit_start',
@@ -557,10 +634,13 @@ export async function runAudit(input: AuditInput) {
       throw new Error(`All Tavily research calls failed: ${failures.join(' | ')}`);
     }
 
+    // Evidence layer: every source gets a stable id that the report must cite; persisted as research.json.
+    researchRecord = toResearchRecord(groups);
+    const idByUrl = new Map(researchRecord.sources.map((src) => [src.url, src.id]));
     const research = groups.map(({ query, results }) => [
       `SEARCH: ${query}`,
       ...results.map((r) => [
-        `TITLE: ${r.title || 'Untitled'}`,
+        `[${idByUrl.get(r.url || '') ?? 'S?'}] TITLE: ${r.title || 'Untitled'}`,
         `URL: ${r.url || ''}`,
         `CONTENT: ${(r.content || '').slice(0, 1800)}`,
       ].join('\n')),
@@ -571,7 +651,7 @@ export async function runAudit(input: AuditInput) {
     let geminiResponse: Response;
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 25000);
+      const timeout = setTimeout(() => controller.abort(), 38000);
 
       try {
         geminiResponse = await fetch(
@@ -592,7 +672,7 @@ export async function runAudit(input: AuditInput) {
               generationConfig: {
                 responseMimeType: 'application/json',
                 responseSchema: AUDIT_RESPONSE_SCHEMA,
-                maxOutputTokens: 8192,
+                maxOutputTokens: 16384, // decision memo + evidence register need headroom; truncated JSON fails the audit
               },
             }),
             signal: controller.signal,
@@ -604,7 +684,7 @@ export async function runAudit(input: AuditInput) {
     } catch (error) {
       const detail =
         error instanceof Error && error.name === 'AbortError'
-          ? 'Request timed out after 25 seconds'
+          ? 'Request timed out after 38 seconds'
           : error instanceof Error
             ? error.message
             : String(error);
@@ -638,7 +718,9 @@ export async function runAudit(input: AuditInput) {
 
     const parsed = JSON.parse(cleanJson(text)) as AuditReport;
     // Prompting alone is not trusted: founder facts, provenance, calculations and units are enforced here.
-    const { report, log } = validateReport(parsed, input.founderFacts);
+    const { report: numbersChecked, log } = validateReport(parsed, input.founderFacts);
+    const { report, log: evidenceLog } = validateEvidence(numbersChecked, researchRecord, input.founderFacts);
+    console.log(JSON.stringify({ event: 'aristotle_evidence_validated', sources: researchRecord?.sources.length ?? 0, ...evidenceLog }));
     console.log(JSON.stringify({ event: 'aristotle_report_validated', corrected: log.corrected.length, keptAsScenario: log.keptAsScenario.length, downgraded: log.downgraded.length, converted: log.converted.length, unitFixed: log.unitFixed.length, insertedFacts: log.insertedFacts.length, proseConflicts: log.proseConflicts.length }));
     const inputTokens = geminiJson.usageMetadata?.promptTokenCount || 0;
     const outputTokens = geminiJson.usageMetadata?.candidatesTokenCount || 0;
@@ -651,6 +733,7 @@ export async function runAudit(input: AuditInput) {
     }));
 
     return {
+      research: researchRecord,
       report,
       pricing: estimateCompute(inputTokens, outputTokens),
       provider: 'gemini-structured-tavily',

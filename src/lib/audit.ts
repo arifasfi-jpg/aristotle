@@ -1,5 +1,16 @@
+import type { DecisionMemo, EvidenceClaim, UnknownMetric } from './evidence';
+import type { FactConcept, FounderFact } from './founder-facts';
 export type Sector = 'Quick Commerce' | 'D2C / Consumer' | 'B2B SaaS' | 'Digital Agency' | 'Fintech' | 'Healthtech' | 'Edtech' | 'Marketplace' | 'Manufacturing' | 'Other';
 export type ReportLanguage = 'Simple English' | 'Hinglish';
+
+export type Provenance = 'FOUNDER_STATED' | 'CALCULATED' | 'EXTERNAL' | 'ASSUMPTION' | 'HYPOTHESIS';
+export type RowTimeframe = 'CURRENT' | 'TARGET' | 'PROPOSED' | 'CONDITIONAL' | 'PROJECTION' | 'ASSUMPTION';
+export type RowConcept = FactConcept | 'contribution' | 'cac' | 'payback';
+export type UnitEconomicsRow = {
+  metric: string; conservative: number; base: number; upside: number; unit: string; commentary: string; assumption: string;
+  // Provenance (optional so older stored reports stay valid)
+  concept?: RowConcept; timeframe?: RowTimeframe; provenance?: Provenance; factId?: string; inputs?: string[]; basis?: string; differsFromFounder?: boolean;
+};
 
 export type AuditReport = {
   executiveSummary: string;
@@ -12,11 +23,15 @@ export type AuditReport = {
   customer: { icp: string; problem: string; willingnessToPay: string };
   businessModel: { revenueModel: string; pricingLogic: string; keyCostDrivers: string[] };
   marketView: { marketType: string; demandSignal: string; competition: string; marketRisk: string };
-  unitEconomics: { metric: string; conservative: number; base: number; upside: number; unit: string; commentary: string; assumption: string }[];
+  unitEconomics: UnitEconomicsRow[];
   experiments: { hypothesis: string; test: string; metric: string; passThreshold: string; failThreshold: string }[];
   operatingModel: string[];
   technologyBuild: { mvp: string[]; avoidBuilding: string[]; estimatedBuildApproach: string };
-  regulatory: { name: string; status: 'Likely' | 'Conditional' | 'Low signal'; rationale: string; action: string; source: string }[];
+  regulatory: { name: string; status: 'Likely' | 'Conditional' | 'Low signal'; rationale: string; action: string; source: string; trigger?: string; activity?: string; requirement?: string; sourceIds?: string[] }[];
+  unknownEconomics?: UnknownMetric[];
+  // Evidence layer (optional: older stored reports do not have these)
+  decisionMemo?: DecisionMemo;
+  evidence?: EvidenceClaim[];
   vulnerabilities: { risk: string; probability: 'Low' | 'Medium' | 'High'; impact: 'Low' | 'Medium' | 'High'; whyItMatters: string; mitigation: string }[];
   goToMarket: string[];
   thirtyDayPlan: { week: string; objective: string; actions: string[]; successMetric: string }[];
@@ -27,7 +42,12 @@ export type AuditReport = {
 
 const isHinglish = (language: ReportLanguage) => language === 'Hinglish';
 
-export function deterministicAudit(input: { idea: string; sector: Sector; stage?: string; geography?: string; language?: ReportLanguage }): AuditReport {
+/**
+ * Structural skeleton of a report (founder facts only, no invented numbers, no research).
+ * NEVER returned to a founder as an audit: the engine has no template path. Used as a test fixture and
+ * as the shape reference for report validation.
+ */
+export function deterministicAudit(input: { idea: string; sector: Sector; stage?: string; geography?: string; language?: ReportLanguage; scope?: string; founderFacts?: FounderFact[] }): AuditReport {
   const t = input.idea.toLowerCase();
   const lang = input.language || 'Simple English';
   const physical = ['Quick Commerce','D2C / Consumer','Manufacturing'].includes(input.sector) || /(store|warehouse|food|device|electronics|product|manufactur|inventory|delivery)/.test(t);
@@ -35,11 +55,6 @@ export function deterministicAudit(input: { idea: string; sector: Sector; stage?
   const money = input.sector === 'Fintech' || /(loan|lending|credit|wallet|payment|insurance|investment|nidhi|nbfc)/.test(t);
   const bis = input.sector === 'Manufacturing' || /(electronics|charger|toy|helmet|appliance|battery|steel|cement|device)/.test(t);
   const subscription = ['B2B SaaS','Digital Agency'].includes(input.sector);
-  const price = subscription ? (input.sector === 'B2B SaaS' ? 5000 : 15000) : input.sector === 'Quick Commerce' ? 450 : input.sector === 'Marketplace' ? 700 : 1200;
-  const grossMargin = input.sector === 'Quick Commerce' ? 0.18 : input.sector === 'Marketplace' ? 0.22 : input.sector === 'D2C / Consumer' ? 0.35 : subscription ? 0.70 : 0.55;
-  const cac = input.sector === 'Digital Agency' ? 15000 : input.sector === 'B2B SaaS' ? 12000 : input.sector === 'Quick Commerce' ? 180 : 350;
-  const unit = subscription ? '₹ / customer / month' : '₹ / transaction';
-  const contribution = Math.round(price * grossMargin);
   const score = Math.max(38, Math.min(86, 67 + (input.sector === 'B2B SaaS' ? 8 : 0) - (money ? 9 : 0) - (physical ? 4 : 0)));
 
   const simple = isHinglish(lang);
@@ -53,12 +68,16 @@ export function deterministicAudit(input: { idea: string; sector: Sector; stage?
     { name: 'Sector licensing', status: money ? 'Likely' as const : 'Conditional' as const, rationale: money ? 'Idea regulated financial activity ko touch karta hai.' : 'No specific sector licence is inferred from the intake alone.', action: money ? 'Exact regulated activity define karke RBI/IRDAI/SEBI or relevant framework validate karein.' : 'Confirm sector and state-specific rules before launch.', source: 'https://www.rbi.org.in/' }
   ];
 
-  const unitEconomics = [
-    { metric: 'Revenue / unit', conservative: Math.round(price*.8), base: price, upside: Math.round(price*1.25), unit, commentary: simple ? 'Real customer pricing se replace karein.' : 'Replace with observed customer pricing.', assumption: 'ASSUMPTION: Sector-default price used. Replace with founder-stated pricing.' },
-    { metric: 'Gross contribution', conservative: Math.round(contribution*.7), base: contribution, upside: Math.round(contribution*1.2), unit, commentary: simple ? 'Direct delivery/service/product cost minus revenue.' : 'Revenue less direct variable cost.', assumption: `ASSUMPTION: Gross margin estimated at ${Math.round(grossMargin*100)}% based on sector default. Replace with actual cost data.` },
-    { metric: 'Acquisition cost', conservative: Math.round(cac*1.3), base: cac, upside: Math.round(cac*.75), unit: '₹ / acquired customer', commentary: 'Illustrative CAC; validate through a paid acquisition or sales pilot.', assumption: 'ASSUMPTION: Sector-default CAC estimate. Not verified. Measure from first 5 customers.' },
-    { metric: 'Contribution after CAC', conservative: Math.round(contribution*.7-cac*1.3), base: contribution-cac, upside: Math.round(contribution*1.2-cac*.75), unit: '₹ / acquired customer', commentary: 'Positive is necessary but not sufficient; payback period also matters.', assumption: 'ASSUMPTION: Derived from above estimates. Replace both inputs with pilot data before using this figure.' }
-  ];
+  const facts = (input.founderFacts || []).filter((f) => f.locked && f.confirmedByFounder);
+  // No sector defaults: numbers exist only if the founder stated them (rows inserted by report validation)
+  // or they are calculated from founder facts.
+  const unitEconomics: UnitEconomicsRow[] = [];
+  const fPrice = facts.find((f) => f.concept === 'selling_price' && f.value !== undefined && f.timeframe !== 'TARGET');
+  const fCost = facts.find((f) => f.concept === 'unit_cost' && f.value !== undefined && f.timeframe !== 'TARGET');
+  if (fPrice && fCost && !fPrice.period && fPrice.unit === fCost.unit) {
+    const c = Math.round((fPrice.value! - fCost.value!) * 100) / 100;
+    unitEconomics.unshift({ metric: 'Contribution per unit (price − cost)', conservative: c, base: c, upside: c, unit: '₹ / unit', commentary: 'Founder price minus founder cost, before shipping, marketing and other variable costs.', assumption: `CALCULATED from ${fPrice.id} and ${fCost.id}.`, concept: 'contribution', timeframe: 'CURRENT', provenance: 'CALCULATED', inputs: [fPrice.id, fCost.id] });
+  }
 
   const vulnerabilities = [
     { risk: 'Demand validation', probability: 'High' as const, impact: 'High' as const, whyItMatters: simple ? 'Idea achha lagna aur customer ka paisa dena alag cheez hai.' : 'Interest is not the same as willingness to pay.', mitigation: simple ? '10–20 target customers ke saath paid/manual pilot run karein.' : 'Run a paid or commitment-based pilot with 10–20 target customers.' },
@@ -154,7 +173,25 @@ export function deterministicAudit(input: { idea: string; sector: Sector; stage?
       avoidBuilding: ['Complex admin panels before demand', 'Large mobile apps before repeat usage', 'Custom AI models without proven volume', 'Multi-city/multi-segment workflows on day one'],
       estimatedBuildApproach: simple ? 'Start with no-code/manual operations where possible; build only the workflow that customers repeatedly use.' : 'Start with manual/no-code operations where possible; build only the workflow customers repeatedly use.'
     },
-    regulatory,
+    // Only regulation triggered by this business model; nothing is listed "by default".
+    regulatory: regulatory
+      .filter((r) => r.name === 'GST' || (r.name === 'BIS' && bis) || (r.name === 'DPDP' && data) || (r.name === 'Sector licensing' && money))
+      .map((r) => ({ ...r, status: r.name === 'GST' ? ('Conditional' as const) : r.status, trigger: r.name === 'GST' ? 'Taxable sales of goods or services (registration depends on turnover and supply type)' : r.name === 'BIS' ? 'Selling a product category that may be under a BIS quality control order' : r.name === 'DPDP' ? 'Collecting and processing customers’ digital personal data' : 'Handling money, credit, payments or insurance for customers' })),
+    // Template fallback (Demo Mode only): no research was done, so every critical assumption is UNKNOWN.
+    decisionMemo: {
+      decisionQuestion: `Is there enough evidence to invest more time and money in this ${input.sector} business?`,
+      criticalAssumptions: [
+        { assumption: 'The target customer has this problem often enough to pay to solve it.', whyItMatters: 'Without a painful, frequent problem there is no business.', evidenceStatus: 'UNKNOWN' as const, evidence: 'No research was performed for this report.', evidenceIds: [], cheapestTest: 'Ask 10 target customers for a deposit or signed commitment.', experimentIndex: 1 },
+        { assumption: 'Customers will accept the price you plan to charge.', whyItMatters: 'Price sets whether each sale makes or loses money.', evidenceStatus: 'UNKNOWN' as const, evidence: 'No research was performed for this report.', evidenceIds: [], cheapestTest: 'State the price in 10 sales conversations and record objections.', experimentIndex: 2 },
+        { assumption: 'Each customer earns more than it costs to win and serve them.', whyItMatters: 'Growth multiplies losses if unit economics are negative.', evidenceStatus: 'UNKNOWN' as const, evidence: 'No research was performed for this report.', evidenceIds: [], cheapestTest: 'Track revenue, variable cost and acquisition cost for the first 5 customers.', experimentIndex: 4 },
+      ],
+      proceedIf: ['At least 3 of 10 target customers pay or commit.', 'Contribution per customer is positive after variable costs.'],
+      changeModelIf: ['Customers like the idea but will not pay.', 'Acquisition cost repeatedly exceeds contribution per customer.'],
+      evidenceStillRequired: ['Real customer willingness to pay', 'Actual variable cost per customer', 'A repeatable acquisition channel'],
+    },
+    evidence: [
+      { claim: 'All market, customer and economics statements in this report are template assumptions, not researched facts.', type: 'ASSUMPTION' as const, sourceIds: [], confidence: 'LOW' as const, validation: 'Run the experiments in section 9.' },
+    ],
     vulnerabilities,
     goToMarket: [
       simple ? 'One ICP choose karein; everyone ko target mat karein.' : 'Choose one ICP; do not target everyone.',
@@ -176,7 +213,9 @@ export function deterministicAudit(input: { idea: string; sector: Sector; stage?
       'These economics are scenario estimates, not market-verified quotes.',
       `Geography assumed: ${input.geography || 'India'}.`,
       `Stage assumed: ${input.stage || 'Idea / pre-launch'}.`,
-      'Regulatory items are screening prompts, not legal or tax advice.'
+      'Regulatory items are screening prompts, not legal or tax advice.',
+      ...(input.scope === 'GROWTH_PLAN' ? ['Scope: existing business (Growth Plan). Founder-stated current numbers are the baseline.'] : []),
+      ...(facts.length ? ['Founder-stated numbers are LOCKED and used exactly as confirmed; sector defaults are never substituted for them.'] : [])
     ],
     nextSteps: [
       simple ? 'Aaj: one ICP + one paid offer finalise karein.' : 'Today: finalise one ICP and one paid offer.',

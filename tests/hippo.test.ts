@@ -52,13 +52,15 @@ describe('Pathways: ambition kept, evidence grounded', () => {
 });
 
 describe('Mogli: work generation and briefs', () => {
-  it('routes work to capabilities and never marks regulated work AI-executable', () => {
+  it('routes work to capabilities; regulatory RESEARCH is AI work, regulated ACTS never are (whatever the planner says)', () => {
     const p = normalisePlan({ headline: 'h', work: [
       { title: 'GTM plan', description: 'd', deliverable: 'A GTM plan', capability: 'marketing', priority: 1, pathwayId: 'P1', whyNow: 'x', aiExecutable: true },
-      { title: 'CDSCO checklist', description: 'd', deliverable: 'Checklist', capability: 'legal_regulatory', priority: 9, pathwayId: 'bad', whyNow: 'x', aiExecutable: true },
+      { title: 'CDSCO checklist', description: 'd', deliverable: 'Checklist', capability: 'legal_regulatory', priority: 9, pathwayId: 'bad', whyNow: 'x', aiExecutable: false },
+      { title: 'File the CDSCO import licence application', description: 'd', deliverable: 'Filed application', capability: 'legal_regulatory', priority: 2, pathwayId: '', whyNow: 'x', aiExecutable: true },
       { title: 'Mystery', description: 'd', deliverable: 'x', capability: 'quantum', priority: 2, pathwayId: '', whyNow: '', aiExecutable: true },
     ] });
-    expect(p.work.map((w) => [w.capability, w.aiExecutable, w.priority, w.pathwayId])).toEqual([['marketing', true, 1, 'P1'], ['legal_regulatory', false, 5, undefined], ['strategy', true, 2, undefined]]);
+    expect(p.work.map((w) => [w.capability, w.aiExecutable, w.priority, w.pathwayId])).toEqual([['marketing', true, 1, 'P1'], ['legal_regulatory', true, 5, undefined], ['legal_regulatory', false, 2, undefined], ['strategy', true, 2, undefined]]);
+    expect(p.work[2].classification).toMatchObject({ executionClass: 'PROFESSIONAL_APPROVAL', modes: ['HYBRID', 'HUMAN'] });
   });
   it('brief inputs marked KNOWN without a value become NEEDED; unset budget stays "Not set by founder"', () => {
     const raw = { objective: 'o', deliverable: 'd', inputs: [{ item: 'Price', status: 'KNOWN', value: '' }, { item: 'Volume', status: 'KNOWN', value: '1,400/month' }], constraints: { geography: 'India' }, successCriteria: ['c'], expectedOutput: 'e', outOfScope: [], effort: {} };

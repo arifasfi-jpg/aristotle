@@ -104,7 +104,11 @@ export const DEFAULT_ORG_NAME = 'My company';
 export const DEMO_COMPANY_NAME = 'Demo Glucose Technologies';
 
 /** A name that does not identify the founder's business (never set, or mistakenly the platform's own name). */
-export const isGenericOrgName = (name: string | null | undefined) => !name || !name.trim() || name.trim().replace(/\s+/g, ' ').toLowerCase() === DEFAULT_ORG_NAME.toLowerCase() || /hippo\s*turtle/i.test(name);
+/** Hippoturtle's own internal capability names (teams inside Hippoturtle) — never a founder's company. */
+export const INTERNAL_CAPABILITY_NAMES = ['Mogli', 'Aristotle', 'Galileo', 'Aaira Studio', 'Marcus', 'Kuber', 'Garg', 'Eagle', 'Sherlock', 'Minerva', 'Xeno', 'Olympus', 'Sia'];
+const norm = (n: string) => n.trim().replace(/\s+/g, ' ').toLowerCase();
+export const isGenericOrgName = (name: string | null | undefined) => !name || !name.trim() || norm(name) === DEFAULT_ORG_NAME.toLowerCase() || /hippo\s*turtle/i.test(name)
+  || INTERNAL_CAPABILITY_NAMES.some((c) => norm(c) === norm(name));
 
 /** The founder's business name, or null when the founder has not named it. Never returns "Hippoturtle". */
 export const businessName = (name: string | null | undefined): string | null => (isGenericOrgName(name) ? null : name!.trim());
@@ -115,5 +119,7 @@ export function identityBlock(company: string | null): string {
   return `IDENTITY (strict): Hippoturtle is the company-building organisation working FOR the founder, like an outsourced team.
 Hippoturtle is NOT the founder's business. The business being analysed and served is ${biz}.
 Never call that business Hippoturtle, never brand its products, pages, campaigns or documents as Hippoturtle, and never write
-as if Hippoturtle sells its products. Deliverables belong to ${company ? `"${company}"` : 'the founder\'s business'}.`;
+as if Hippoturtle sells its products. Deliverables belong to ${company ? `"${company}"` : 'the founder\'s business'}.
+Names of Hippoturtle's internal capabilities (its teams, e.g. the one executing this work) are never the founder's company, brand,
+product or author.`;
 }

@@ -1,5 +1,7 @@
 // AI execution of a work item, and the honest-broker quote comparison.
 import type { Capability } from './capabilities';
+import { MARKETING_CLAIM_RULES } from './claims';
+import { PERFORMER_LABEL, type WorkClassification } from './work-classification';
 import type { BriefData } from './mogli';
 import { identityBlock } from './types';
 
@@ -17,13 +19,21 @@ export const EXECUTE_SCHEMA = {
 
 export type ExecutionOutput = { summary: string; markdown: string; assumptions: string[]; founderInputsNeeded: string[]; professionalReviewRequired: boolean };
 
-export function executePrompt(input: { title: string; brief: BriefData; cap: Capability; mode: 'AI' | 'HYBRID'; memory: string; research: string; company?: string | null }): string {
-  return `You are the ${input.cap.label} capability (${input.cap.internalName}) at Hippoturtle, executing a work item for a founder in India.
+/** Customer-facing deliverables get the marketing-claim rules and the deterministic claim guard. */
+export const isCustomerFacing = (cap: Capability) => cap.id === 'marketing' || cap.id === 'sales';
+
+export function executePrompt(input: { title: string; brief: BriefData; cap: Capability; mode: 'AI' | 'HYBRID'; memory: string; research: string; company?: string | null; classification?: WorkClassification }): string {
+  const cls = input.classification;
+  return `You are the ${input.cap.label} capability (${input.cap.internalName}) at Hippoturtle, executing a work item for a founder (geography: see CONSTRAINTS).
 Produce the COMPLETE deliverable now — not an outline, not advice about how to do it.
 ${identityBlock(input.company ?? null)}
 
 WORK: ${input.title}
-OBJECTIVE: ${input.brief.objective}
+${cls?.tool ? `TOOL: ${input.cap.internalName} › ${cls.tool.label} — produce ${cls.tool.produces}.
+` : ''}${cls ? `YOU PREPARE: ${cls.aiPrepares}
+EXTERNAL ACTIONS — you do NOT perform these and must never say they were done; end the deliverable with a "Next steps that need you" list:
+${cls.externalActions.map((a) => `- ${a.step} (${PERFORMER_LABEL[a.performedBy]}${a.integration ? `; ${a.integration.label} is not connected` : ''}; needs the founder's approval)`).join('\n') || '- none'}
+` : ''}OBJECTIVE: ${input.brief.objective}
 DELIVERABLE: ${input.brief.deliverable}
 EXPECTED OUTPUT: ${input.brief.expectedOutput}
 SUCCESS CRITERIA:\n${input.brief.successCriteria.map((c) => `- ${c}`).join('\n')}
@@ -42,7 +52,10 @@ RULES:
   write [TO CONFIRM: …] and list it under founderInputsNeeded.
 - Label anything uncertain as an assumption and also list it under assumptions.
 - ${input.cap.requiresProfessional || input.mode === 'HYBRID' ? 'This is a DRAFT for human review. State clearly at the top that it must be reviewed' + (input.cap.requiresProfessional ? ' and approved by a qualified professional before use. Do not present it as legal or tax advice.' : '.') : 'This should be usable by the founder today.'}
-- Format markdown with clear headings, tables where useful, and concrete next actions. India context. Simple English.
+${isCustomerFacing(input.cap) ? `${MARKETING_CLAIM_RULES}
+` : ''}- If source material the work depends on (a manuscript, a data export) is not in the inputs or memory, do not invent it:
+  produce the structure/template and mark the gaps [INSERT …], and list the material under founderInputsNeeded.
+- Format markdown with clear headings, tables where useful, and concrete next actions. India context unless the objective says otherwise. Simple English.
 - summary: 2–3 sentences on what was produced.
 JSON only.`;
 }

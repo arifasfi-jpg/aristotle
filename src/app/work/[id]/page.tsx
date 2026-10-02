@@ -2,14 +2,16 @@ import Link from 'next/link';
 import { notFound, redirect } from 'next/navigation';
 import { ArrowLeft, Download, Scale, ShieldAlert } from 'lucide-react';
 import { db } from '@/lib/db';
-import { allowedModes, routeCapability } from '@/lib/hippo/capabilities';
+import { routeCapability } from '@/lib/hippo/capabilities';
+import { guardMarketingClaims } from '@/lib/hippo/claims';
 import { HttpError, requireWork } from '@/lib/hippo/context';
-import { LABELS } from '@/lib/hippo/costs';
-import { withAiProvenance, type QuoteComparison } from '@/lib/hippo/execution';
+import { computeEstimates, LABELS, normaliseEffort } from '@/lib/hippo/costs';
+import { isCustomerFacing, withAiProvenance, type QuoteComparison } from '@/lib/hippo/execution';
 import { workPaymentPlan } from '@/lib/hippo/payments';
 import { classifyInputs, INPUT_LABEL, proposedLabel, type BriefInput } from '@/lib/hippo/provenance';
 import { provenanceFor } from '@/lib/hippo/service';
 import type { EffortModel } from '@/lib/hippo/types';
+import { classifyWork, PERFORMER_LABEL } from '@/lib/hippo/work-classification';
 import Markdown from '@/components/hippo/Markdown';
 import { AutoRefresh } from '@/components/hippo/Status';
 import { ApproveInput, AutoBrief, ChooseMode, ExecuteButton, OutcomeForm, QuoteForm, type Option } from '@/components/hippo/WorkActions';
@@ -26,7 +28,9 @@ export default async function WorkPage({ params }: { params: Promise<{ id: strin
   let ctx;
   try { ctx = await requireWork(id); } catch (e) { if (e instanceof HttpError && e.status === 401) redirect('/start'); return notFound(); }
   const { work, objective } = ctx;
-  const cap = routeCapability(work.capability);
+  // What this work is (deliverable vs external actions) and who does it — derived from this work only.
+  const classification = classifyWork(work);
+  const cap = routeCapability(classification.capabilityId);
   const [brief, estimates, quotes, executions, outcomes] = await Promise.all([
     db.workBrief.findUnique({ where: { workId: work.id } }),
     db.costEstimate.findMany({ where: { workId: work.id }, orderBy: { createdAt: 'asc' } }),
@@ -35,10 +39,15 @@ export default async function WorkPage({ params }: { params: Promise<{ id: strin
     db.outcome.findMany({ where: { workId: work.id }, orderBy: { createdAt: 'desc' } }),
   ]);
   // Provenance is re-derived on every view: an AI proposal never shows as Known unless the founder stated or approved it.
-  const inputs = brief ? classifyInputs(brief.inputs as BriefInput[], await provenanceFor(objective)) : [];
-  const est = (m: string) => estimates.find((e) => e.mode === m);
-  const modes = allowedModes(cap);
+  const provenance = await provenanceFor(objective);
+  const inputs = brief ? classifyInputs(brief.inputs as BriefInput[], provenance) : [];
+  const modes = classification.modes;
   const effort = brief?.effort as EffortModel | undefined;
+  // Briefs written before classification may lack an AI estimate; show the computed one (stored when chosen).
+  const aiFallback = brief && modes.includes('AI') && !estimates.some((e) => e.mode === 'AI') ? computeEstimates(normaliseEffort(effort, cap), cap, 3000, modes).find((e) => e.mode === 'AI') : undefined;
+  const est = (m: string) => estimates.find((e) => e.mode === m) ?? (m === 'AI' && aiFallback ? { ...aiFallback, id: 'computed-ai' } : undefined);
+  const shownEstimates = aiFallback ? [{ ...aiFallback, id: 'computed-ai' }, ...estimates] : estimates;
+  const professional = classification.executionClass === 'AI_WITH_HUMAN_REVIEW' || classification.executionClass === 'PROFESSIONAL_APPROVAL';
   const latest = executions[0];
   const output = executions.find((e) => e.output);
   const running = work.status === 'IN_PROGRESS' && latest?.status === 'RUNNING';
@@ -47,17 +56,28 @@ export default async function WorkPage({ params }: { params: Promise<{ id: strin
     const e = est(mode); const allowed = modes.includes(mode);
     return { mode, title, range: e ? inrRange(e.low, e.high) : allowed && mode !== 'AI' ? 'Quote required' : '—', label: e ? (e.label === 'COMPUTED' ? 'Calculated from AI model rates' : 'Indicative estimate — external quote required') : allowed ? 'No benchmark yet — external quote required' : '',
       note: e?.basis || workPaymentPlan(mode).note, available: allowed && (mode !== 'AI' || Boolean(e)),
-      reason: !allowed ? (cap.requiresProfessional && mode === 'AI' ? 'Not offered: this work legally needs a qualified professional. AI prepares, a professional approves.' : 'Not available for this capability.') : 'AI cannot do this work on its own (calls, visits, signatures or judgement needed).' };
+      reason: !allowed ? `Not offered: ${classification.summary}` : 'No estimate yet.' };
   };
 
   return <Shell>
     <Link href={`/objectives/${objective.id}`} className="inline-flex items-center gap-1 text-sm font-semibold text-[#5B6478] hover:text-[#0B1533]"><ArrowLeft size={15}/>Back to objective</Link>
-    <div className="mt-4 flex flex-wrap items-center gap-2"><Eyebrow>Work · {cap.label}</Eyebrow><span className="text-xs text-[#6B7389]">routed by Mogli to {cap.internalName}</span><WorkStatus status={work.status}/>{cap.requiresProfessional && <Badge tone="amber">Professional sign-off required</Badge>}</div>
+    <div className="mt-4 flex flex-wrap items-center gap-2"><Eyebrow>Work · {cap.label}</Eyebrow><span className="text-xs text-[#6B7389]">routed by Mogli to {cap.internalName}{classification.tool ? ` › ${classification.tool.label}` : ''}</span><WorkStatus status={work.status}/>{professional && <Badge tone="amber">Professional sign-off required</Badge>}</div>
     <h1 className="mt-2 text-3xl font-extrabold tracking-tight">{work.title}</h1>
     <p className="mt-2 max-w-3xl whitespace-pre-line leading-7 text-[#5B6478]">{work.description}</p>
 
     <div className="mt-8 grid gap-6 lg:grid-cols-[1.25fr_1fr]">
       <div className="min-w-0 space-y-6">
+        <Card>
+          <h2 className="text-xl font-extrabold">Who does what</h2>
+          <p className="mt-1 text-sm font-semibold text-[#14663D]">{classification.summary}</p>
+          {cap.requiresProfessional && !professional && <p className="mt-1 text-xs text-[#9A4B00]">Research prepared by AI — not legal or tax advice. Signing, filing and drafts you will rely on need a qualified {cap.costModel.specialist.toLowerCase()}.</p>}
+          <Block title={classification.aiCanExecute ? 'AI can prepare this' : 'AI can prepare the supporting material'}><p className="text-sm leading-6">{classification.aiPrepares}</p>
+            {classification.requiredInputs.length > 0 && <div className="mt-2 text-sm"><div className="font-bold">Needed from you for a good result</div><List items={classification.requiredInputs} /></div>}</Block>
+          {classification.externalActions.length > 0 && <Block title="These steps need your approval, an external account, a person or a professional">
+            <ul className="space-y-2 text-sm">{classification.externalActions.map((a, i) => <li key={i} className="flex flex-wrap items-center gap-2"><Badge tone={a.performedBy === 'PROFESSIONAL' ? 'amber' : a.performedBy === 'INTEGRATION' ? 'blue' : 'grey'}>{PERFORMER_LABEL[a.performedBy]}</Badge><span>{a.step}</span>{a.founderApproval && <span className="text-xs text-[#6B7389]">· needs your approval</span>}</li>)}</ul>
+            <p className="mt-2 text-xs text-[#6B7389]">Hippoturtle never publishes, sends, signs, files or pays on its own. External integrations are not connected yet.</p>
+          </Block>}
+        </Card>
         {!brief ? <AutoBrief workId={work.id} /> : <Card>
           <div className="flex items-center justify-between"><h2 className="text-xl font-extrabold">Work brief</h2><span className="text-xs text-[#6B7389]">Written by Mogli · {brief.provider}/{brief.model}</span></div>
           <div className="mt-4">
@@ -82,9 +102,9 @@ export default async function WorkPage({ params }: { params: Promise<{ id: strin
               <a href={`/api/hippo/work/${work.id}/output`} className="inline-flex items-center gap-2 rounded-xl border border-[#D9D0BF] bg-white px-4 py-2 text-sm font-semibold hover:border-[#0B1533]"><Download size={15}/>Download (.md)</a>
             </div>
             {output.outputSummary && <p className="mt-3 rounded-xl bg-[#F4FAF6] p-3 text-sm leading-6">{output.outputSummary}</p>}
-            {(cap.requiresProfessional || output.status === 'WAITING_FOR_REVIEW') && <div className="mt-3 flex gap-2 rounded-xl bg-[#FFF1DF] p-3 text-sm text-[#6B3A00]"><ShieldAlert size={17} className="mt-0.5 shrink-0"/>{cap.requiresProfessional ? `Prepared by AI. A qualified ${cap.costModel.specialist.toLowerCase()} must review and approve this before it is relied on. Hippoturtle is not a lawyer or CA.` : 'AI draft complete. A human reviewer has not been assigned yet — add a quote below or review it yourself, then record the outcome.'}</div>}
+            {(professional || cap.requiresProfessional || output.status === 'WAITING_FOR_REVIEW') && <div className="mt-3 flex gap-2 rounded-xl bg-[#FFF1DF] p-3 text-sm text-[#6B3A00]"><ShieldAlert size={17} className="mt-0.5 shrink-0"/>{professional ? `Prepared by AI. A qualified ${cap.costModel.specialist.toLowerCase()} must review and approve this before it is relied on. Hippoturtle is not a lawyer or CA.` : cap.requiresProfessional ? `Research prepared by AI — not legal or tax advice. Confirm with a qualified ${cap.costModel.specialist.toLowerCase()} before relying on it for a filing or contract.` : 'AI draft complete. A human reviewer has not been assigned yet — add a quote below or review it yourself, then record the outcome.'}</div>}
             {(() => { const meta = output.input as { founderInputsNeeded?: string[] }; return meta?.founderInputsNeeded?.length ? <div className="mt-3 text-sm"><div className="font-bold">Needed from you</div><List items={meta.founderInputsNeeded} /></div> : null; })()}
-            <div className="mt-5 max-h-[720px] overflow-y-auto rounded-2xl border border-[#E9E2D4] bg-white p-5"><Markdown>{withAiProvenance(output.output || '', (output.input || {}) as { assumptions?: unknown; founderInputsNeeded?: unknown })}</Markdown></div>
+            <div className="mt-5 max-h-[720px] overflow-y-auto rounded-2xl border border-[#E9E2D4] bg-white p-5"><Markdown>{withAiProvenance(isCustomerFacing(cap) ? guardMarketingClaims(output.output || '', provenance).markdown : output.output || '', (output.input || {}) as { assumptions?: unknown; founderInputsNeeded?: unknown })}</Markdown></div>
           </>}
         </Card>}
         {latest?.status === 'FAILED' && !running && <Card><div className="font-bold text-[#A3271B]">The last attempt failed and nothing was charged.</div><p className="text-sm text-[#5B6478]">You can retry below.</p></Card>}
@@ -94,9 +114,9 @@ export default async function WorkPage({ params }: { params: Promise<{ id: strin
         {brief && <Card>
           <div className="flex items-center gap-2"><Scale size={18} className="text-[#4F46E5]"/><h2 className="text-xl font-extrabold">Hippoturtle estimate</h2></div>
           <p className="mt-1 text-xs text-[#6B7389]">Estimates, not market prices. AI cost is calculated from configured model rates; human and agency figures are AI-generated benchmarks from the effort assumptions shown.</p>
-          <div className="mt-4 space-y-2">{estimates.map((e) => <div key={e.id} className="rounded-xl border border-[#E9E2D4] p-3"><div className="flex items-center justify-between gap-2"><span className="text-sm font-bold">{{ AI: 'AI / internal execution', HUMAN: 'Human specialist', HYBRID: 'Hybrid (AI + human review)', AGENCY: 'Agency' }[e.mode] || e.mode}</span><span className="text-lg font-extrabold">{inrRange(e.low, e.high)}</span></div><div className="mt-1 text-[11px] font-semibold text-[#9A4B00]">{LABELS[e.label as keyof typeof LABELS] || e.label}</div><p className="mt-1 text-xs leading-5 text-[#5B6478]">{e.basis}</p>{e.mode === 'AI' && <div className="mt-2 grid grid-cols-2 gap-1 text-[11px] text-[#5B6478]">{Object.entries(e.breakdown as Record<string, number | string>).map(([k, v]) => <div key={k}>{k}: <b>{typeof v === 'number' ? inr(v, 2).replace('₹', '') : v}</b></div>)}</div>}</div>)}
-            {!estimates.length && <p className="text-sm italic text-[#8A6A3B]">No estimate could be established for this work.</p>}</div>
-          {effort?.costDrivers && <div className="mt-4"><div className="text-sm font-bold">Why does the cost vary?</div><List items={(estimates.find((e) => e.mode !== 'AI')?.drivers as string[]) || effort.costDrivers} /></div>}
+          <div className="mt-4 space-y-2">{shownEstimates.map((e) => <div key={e.id} className="rounded-xl border border-[#E9E2D4] p-3"><div className="flex items-center justify-between gap-2"><span className="text-sm font-bold">{{ AI: 'AI / internal execution', HUMAN: 'Human specialist', HYBRID: 'Hybrid (AI + human review)', AGENCY: 'Agency' }[e.mode] || e.mode}</span><span className="text-lg font-extrabold">{inrRange(e.low, e.high)}</span></div><div className="mt-1 text-[11px] font-semibold text-[#9A4B00]">{LABELS[e.label as keyof typeof LABELS] || e.label}</div><p className="mt-1 text-xs leading-5 text-[#5B6478]">{e.basis}</p>{e.mode === 'AI' && <div className="mt-2 grid grid-cols-2 gap-1 text-[11px] text-[#5B6478]">{Object.entries(e.breakdown as Record<string, number | string>).map(([k, v]) => <div key={k}>{k}: <b>{typeof v === 'number' ? inr(v, 2).replace('₹', '') : v}</b></div>)}</div>}</div>)}
+            {!shownEstimates.length && <p className="text-sm italic text-[#8A6A3B]">No estimate could be established for this work.</p>}</div>
+          {effort?.costDrivers && <div className="mt-4"><div className="text-sm font-bold">Why does the cost vary?</div><List items={(shownEstimates.find((e) => e.mode !== 'AI')?.drivers as string[]) || effort.costDrivers} /></div>}
         </Card>}
 
         {brief && <Card>

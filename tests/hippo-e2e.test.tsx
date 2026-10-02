@@ -145,7 +145,7 @@ describe.skipIf(!E2E)('Hippoturtle founder journey (real Postgres)', () => {
     const wk = await json(r.work.POST(req(), ctx(objectiveId)));
     expect(wk.body.work).toHaveLength(3);
     const works = await db.work.findMany({ where: { objectiveId }, orderBy: { priority: 'asc' } });
-    expect(works.map((w: { capability: string; aiExecutable: boolean }) => [w.capability, w.aiExecutable])).toEqual([['marketing', true], ['sales', false], ['legal_regulatory', false]]);
+    expect(works.map((w: { capability: string; aiExecutable: boolean }) => [w.capability, w.aiExecutable])).toEqual([['marketing', true], ['sales', false], ['legal_regulatory', true]]); // regulatory research is AI work; calling prospects is a person's
     page = await html(pages.objective({ params: Promise.resolve({ id: objectiveId }) }));
     expect(page).toContain('Here’s what needs to happen.');
     expect(page).toContain('There are 3 important pieces of work');
@@ -160,9 +160,14 @@ describe.skipIf(!E2E)('Hippoturtle founder journey (real Postgres)', () => {
     let wp = await html(pages.work({ params: Promise.resolve({ id: gtm.id }) }));
     for (const s of ['Work brief', 'Needed from you', 'Not set by founder', 'Hippoturtle estimate', 'Indicative estimate — external quote required', 'USE HIPPOTURTLE', 'USE EXTERNAL PROVIDER', 'HYBRID', 'DECIDE LATER', 'External quote not yet available']) expect(wp).toContain(s);
 
-    // Regulated work never offers AI-only.
+    // A person's act (calling prospects) never offers AI-only; regulatory RESEARCH is AI work (only signing/filing is not).
+    await json(r.brief.POST(req(), ctx(works[1].id)));
+    const humanOnly = await json(r.choose.POST(req({ mode: 'AI' }), ctx(works[1].id)));
+    expect(humanOnly.status).toBe(400);
+    expect(humanOnly.body.error).toMatch(/A person needs to do this work/);
     await json(r.brief.POST(req(), ctx(works[2].id)));
-    expect((await json(r.choose.POST(req({ mode: 'AI' }), ctx(works[2].id)))).status).toBe(400);
+    expect((await json(r.choose.POST(req({ mode: 'AI' }), ctx(works[2].id)))).status).toBe(200);
+    expect(await html(pages.work({ params: Promise.resolve({ id: works[2].id }) }))).toContain('not legal or tax advice');
 
     // 10–12. Founder chooses Hippoturtle; execution fails once (retryable, nothing lost), then succeeds.
     expect((await json(r.choose.POST(req({ mode: 'AI' }), ctx(gtm.id)))).body).toMatchObject({ mode: 'AI', payment: { status: 'INCLUDED_EARLY_ACCESS', required: false } });

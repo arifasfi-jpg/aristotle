@@ -1,6 +1,7 @@
 // Mogli · Chief of Staff. Turns the founder's chosen pathways into concrete work packages,
 // writes structured Work Briefs and routes each piece of work to a capability.
-import { enabledCapabilities, routeCapability, type Capability } from './capabilities';
+import { enabledCapabilities, routeCapability, STUDIO_TOOLS, type Capability } from './capabilities';
+import { classifyWork, PERFORMER_LABEL, type WorkClassification } from './work-classification';
 import { identityBlock, type Pathway, type Understanding, type WorkPlanItem } from './types';
 import { describeFact, type FounderFact } from '../founder-facts';
 import { classifyInputs, type BriefInput, type ProvenanceContext } from './provenance';
@@ -13,13 +14,15 @@ export const PLAN_SCHEMA = {
     work: { type: 'array', items: { type: 'object', properties: {
       title: { type: 'string' }, description: { type: 'string' }, deliverable: { type: 'string' }, capability: { type: 'string' },
       priority: { type: 'integer' }, pathwayId: { type: 'string' }, whyNow: { type: 'string' }, aiExecutable: { type: 'boolean' },
-    }, required: ['title', 'description', 'deliverable', 'capability', 'priority', 'pathwayId', 'whyNow', 'aiExecutable'] } },
+      externalSteps: { type: 'array', items: { type: 'string' } },
+    }, required: ['title', 'description', 'deliverable', 'capability', 'priority', 'pathwayId', 'whyNow', 'aiExecutable', 'externalSteps'] } },
   },
   required: ['headline', 'work'],
 };
 
 export function planPrompt(input: { objective: string; understanding: Understanding | null; pathways: Pathway[]; experiments: { test: string; passThreshold: string }[]; thirtyDayPlan: { week: string; objective: string }[]; memory: string; company?: string | null }): string {
-  const caps = enabledCapabilities().map((c) => `- ${c.id}: ${c.label} — ${c.description}${c.requiresProfessional ? ' (regulated: AI prepares, professional approves)' : ''}`).join('\n');
+  const caps = enabledCapabilities().map((c) => `- ${c.id}: ${c.label} — ${c.description}${c.requiresProfessional ? ' (regulated: AI researches and prepares; signing, filing and reliance-grade drafts need a professional)' : ''}`).join('\n');
+  const studio = STUDIO_TOOLS.filter((t) => t.kind === 'GENERATE').map((t) => t.label).join(', ');
   return `You are Mogli, Chief of Staff at Hippoturtle. Convert the founder's chosen pathways into the work that must happen
 between today and the FIRST VALIDATION MILESTONE (roughly the next 30 days).
 ${identityBlock(input.company ?? null)}
@@ -43,24 +46,36 @@ CAPABILITIES YOU CAN ROUTE TO (use the id exactly):
 ${caps}
 
 RULES:
-- 4 to 7 work packages. Each must produce ONE concrete deliverable (a document, page, list, script, plan, checklist).
+- 4 to 7 work packages. Each must produce ONE concrete deliverable (a document, page, list, script, plan, checklist, model, creative).
 - Tie each to a chosen pathway via pathwayId (P#), or "" if it supports all.
-- At least one must be fully doable by AI today (e.g. a GTM plan, outreach scripts, landing-page copy, pricing test design).
-- Regulatory, legal or tax work goes to legal_regulatory / accounting_tax and is NEVER aiExecutable.
-- Work that needs physical presence, calls, negotiations or signatures: aiExecutable=false.
+- DELIVERABLE vs EXTERNAL ACTION: the title names what Hippoturtle PRODUCES ("Create Google Search campaign", "Format the manuscript",
+  "Calculate unit economics from the supplied transaction data"). Steps that need the outside world — publishing through an account,
+  sending to real people, calls/visits, printing/shipping, signing, filing with an authority, paying money — go in externalSteps
+  (e.g. ["Publish the campaign from the founder's Google Ads account after approval"]). A later human step never makes the deliverable human-only.
+- Only when the work ITSELF is a person's act (calling 50 prospects, signing, filing, paying) is it titled that way; Hippoturtle then
+  prepares the supporting material.
+- Creative & marketing work (${studio}, campaign preparation) goes to marketing (Aaira Studio, one capability).
+  Financial analysis and models go to finance. Regulatory research goes to legal_regulatory; it is AI work — only signing, filing
+  and drafts that will be relied on need a professional.
+- aiExecutable: true when AI can produce the deliverable (given the founder's inputs). It is advisory; Hippoturtle re-derives it.
 - priority: 1 = do first … 5 = later. whyNow: one sentence linked to the validation milestone.
 - headline: one sentence the founder will read ("There are N important pieces of work between here and …").
 - No invented statistics or prices. Simple English. JSON only.`;
 }
 
-export function normalisePlan(raw: unknown): { headline: string; work: (WorkPlanItem & { cap: Capability })[] } {
+export function normalisePlan(raw: unknown): { headline: string; work: (WorkPlanItem & { cap: Capability; classification: WorkClassification })[] } {
   const r = (raw || {}) as { headline?: unknown; work?: unknown };
   const s = (v: unknown, n: number) => (typeof v === 'string' ? v.trim().slice(0, n) : '');
   const work = (Array.isArray(r.work) ? r.work : []).slice(0, 7).map((w: Record<string, unknown>) => {
-    const cap = routeCapability(s(w.capability, 40));
     const priority = Math.min(5, Math.max(1, Math.round(Number(w.priority) || 3)));
     const pathwayId = /^P\d+$/.test(s(w.pathwayId, 5)) ? s(w.pathwayId, 5) : undefined;
-    return { title: s(w.title, 140), description: s(w.description, 1200), deliverable: s(w.deliverable, 600), capability: cap.id, cap, priority, pathwayId, whyNow: s(w.whyNow, 400), aiExecutable: Boolean(w.aiExecutable) && cap.aiExecutable && !cap.requiresProfessional };
+    const steps = (Array.isArray(w.externalSteps) ? w.externalSteps : []).map((x) => s(x, 200).replace(/[;|\n]+/g, ', ')).filter(Boolean).slice(0, 5);
+    const description = `${s(w.description, 1200)}${steps.length ? `\n\nExternal steps (not done by AI): ${steps.join('; ')}` : ''}`;
+    const item = { title: s(w.title, 140), description, deliverable: s(w.deliverable, 600), capability: s(w.capability, 40) };
+    // Routing and execution class are derived from THIS work only; the planner's capability/aiExecutable are hints.
+    const classification = classifyWork(item);
+    const cap = routeCapability(classification.capabilityId);
+    return { ...item, capability: classification.capabilityId, cap, classification, priority, pathwayId, whyNow: s(w.whyNow, 400), aiExecutable: classification.aiCanExecute };
   }).filter((w) => w.title && w.deliverable);
   if (work.length < 2) throw new Error('PLAN_INVALID: fewer than two usable work packages were produced');
   return { headline: s(r.headline, 400) || `There are ${work.length} important pieces of work between here and your first validation milestone.`, work };
@@ -88,7 +103,8 @@ export const BRIEF_SCHEMA = {
   required: ['objective', 'deliverable', 'inputs', 'constraints', 'successCriteria', 'expectedOutput', 'outOfScope', 'effort'],
 };
 
-export function briefPrompt(input: { work: { title: string; description: string; deliverable: string }; cap: Capability; objective: string; memory: string; timeCommitment: string | null; company?: string | null; facts?: FounderFact[]; findings?: { code: string; statement: string }[] }): string {
+export function briefPrompt(input: { work: { title: string; description: string; deliverable: string }; cap: Capability; objective: string; memory: string; timeCommitment: string | null; company?: string | null; facts?: FounderFact[]; findings?: { code: string; statement: string }[]; classification?: WorkClassification }): string {
+  const cls = input.classification ?? classifyWork({ ...input.work, capability: input.cap.id });
   return `You are Mogli, Chief of Staff at Hippoturtle. Write a precise WORK BRIEF so that ANY executor (AI, freelancer, agency)
 must deliver exactly the same thing. Vague briefs let providers overcharge or under-deliver; be specific.
 ${identityBlock(input.company ?? null)}
@@ -96,7 +112,10 @@ ${identityBlock(input.company ?? null)}
 WORK: ${input.work.title}
 Description: ${input.work.description}
 Deliverable: ${input.work.deliverable}
-Capability: ${input.cap.label}${input.cap.requiresProfessional ? ' — REGULATED: a qualified professional must review/sign where the law requires' : ''}
+Capability: ${input.cap.label} (${input.cap.internalName})${cls.tool ? ` · tool: ${cls.tool.label} — produces ${cls.tool.produces}` : ''}${input.cap.requiresProfessional ? ' — REGULATED: a qualified professional must review/sign where the law requires' : ''}
+WHAT HIPPOTURTLE PREPARES: ${cls.aiPrepares}
+EXTERNAL ACTIONS (NOT part of the deliverable; list them in outOfScope as founder/human steps):
+${cls.externalActions.map((a) => `- ${a.step} — ${PERFORMER_LABEL[a.performedBy]}${a.integration ? ` via ${a.integration.label} (not connected)` : ''}; founder approval required`).join('\n') || '- none'}
 FOUNDER OBJECTIVE (verbatim, founder stated): """${input.objective}"""
 Founder's available time: ${input.timeCommitment || 'not stated'}
 
@@ -122,7 +141,8 @@ RULES:
   in INR for that specialist (state the basis in rateBasis, e.g. "assumed freelance rate for a mid-level specialist in India — not a market quote"),
   review hours if AI drafts and a human reviews, an agency multiplier, aiOutputTokens needed for an AI draft (1000–9000),
   and costDrivers (what makes the cost go up or down for THIS work).
-- aiFeasible=false for anything needing calls, visits, signatures, or a licensed professional's judgement.
+- aiFeasible: true when AI can produce THE DELIVERABLE above (documents, designs, copy, layouts, plans, analyses, models, research),
+  even if an external action follows. Missing source material (a manuscript, a data export) is an input NEEDED, not a reason for false.
 Simple English. JSON only.`;
 }
 

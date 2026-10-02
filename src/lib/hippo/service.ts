@@ -6,10 +6,12 @@ import type { AuditReport } from '../audit';
 import { getLockedFacts, getResearch } from '../audit-meta';
 import type { ResearchRecord } from '../evidence';
 import { researchBrief } from '../research';
-import { allowedModes, getCapability, routeCapability } from './capabilities';
+import { getCapability, routeCapability } from './capabilities';
+import { guardMarketingClaims } from './claims';
+import { classifyWork } from './work-classification';
 import { HttpError, isUniqueViolation, logActivity, memoryBrief, remember } from './context';
 import { computeEstimates, midpoint, normaliseEffort } from './costs';
-import { comparePrompt, COMPARE_SCHEMA, EXECUTE_SCHEMA, executePrompt, normaliseOutput, positionQuote, rulesExplanation, withAiProvenance, type QuoteComparison } from './execution';
+import { comparePrompt, COMPARE_SCHEMA, EXECUTE_SCHEMA, executePrompt, isCustomerFacing, normaliseOutput, positionQuote, rulesExplanation, withAiProvenance, type QuoteComparison } from './execution';
 import { aiMeta, generateJson, type GatewayResult } from './gateway';
 import { BRIEF_SCHEMA, briefPrompt, normaliseBrief, normalisePlan, PLAN_SCHEMA, planPrompt, type BriefData } from './mogli';
 import { normalisePathways, PATHWAYS_SCHEMA, pathwaysPrompt } from './pathways';
@@ -199,16 +201,18 @@ export async function prepareBrief(ctx: { work: { id: string; organizationId: st
   const { work, objective } = ctx;
   const existing = await db.workBrief.findUnique({ where: { workId: work.id } });
   if (existing) return existing;
-  const cap = routeCapability(work.capability);
+  // Routing + execution class come from THIS work only (never from other objectives, earlier work or memory).
+  const classification = classifyWork(work);
+  const cap = routeCapability(classification.capabilityId);
   const memory = await memoryBrief(objective.organizationId, objective.id);
   const provenance = await provenanceFor(objective);
-  const prompt = briefPrompt({ work, cap, objective: objective.text, memory, timeCommitment: ctx.founder.timeCommitment, company: await companyFor(objective), facts: provenance.facts, findings: provenance.findings });
+  const prompt = briefPrompt({ work, cap, objective: objective.text, memory, timeCommitment: ctx.founder.timeCommitment, company: await companyFor(objective), facts: provenance.facts, findings: provenance.findings, classification });
   const r = await generateJson<unknown>('brief', prompt, BRIEF_SCHEMA);
   await logAi(objective.organizationId, objective.id, work.id, r, 'Mogli');
   const brief = normaliseBrief(r.data, cap, provenance);
   const effort = normaliseEffort(brief.effort as Partial<EffortModel>, cap);
   const promptTokens = Math.round((prompt.length + memory.length) / 4);
-  const estimates = computeEstimates(effort, cap, promptTokens);
+  const estimates = computeEstimates(effort, cap, promptTokens, classification.modes);
   let saved;
   try {
     saved = await db.workBrief.create({ data: { workId: work.id, objective: brief.objective, deliverable: brief.deliverable, inputs: json(brief.inputs), constraints: json(brief.constraints), successCriteria: json(brief.successCriteria), expectedOutput: brief.expectedOutput, outOfScope: json(brief.outOfScope), effort: json(effort), provider: r.provider, model: r.model } });
@@ -221,19 +225,27 @@ export async function prepareBrief(ctx: { work: { id: string; organizationId: st
 }
 
 // ---------------------------------------------------------------- FOUNDER CHOICE
-export async function chooseExecution(ctx: { work: { id: string; organizationId: string; objectiveId: string; title: string; capability: string; status: string }; objective: Objective }, choice: string) {
+export async function chooseExecution(ctx: { work: { id: string; organizationId: string; objectiveId: string; title: string; capability: string; status: string; description?: string; deliverable?: string }; objective: Objective }, choice: string) {
   const { work, objective } = ctx;
   if (['IN_PROGRESS', 'COMPLETED', 'CANCELLED'].includes(work.status)) throw new HttpError(409, 'This work can no longer change execution mode.');
-  if (!(await db.workBrief.findUnique({ where: { workId: work.id } }))) throw new HttpError(409, 'The work brief has not been written yet.');
+  const briefRow = await db.workBrief.findUnique({ where: { workId: work.id } });
+  if (!briefRow) throw new HttpError(409, 'The work brief has not been written yet.');
   if (choice === 'LATER') {
     await db.work.update({ where: { id: work.id }, data: { status: 'AWAITING_DECISION', executionMode: null } });
     await logActivity({ organizationId: work.organizationId, objectiveId: objective.id, workId: work.id, type: 'FOUNDER_CHOICE', actor: 'Founder', message: `Founder will decide later on "${work.title}".` });
     return { mode: null, payment: null };
   }
   if (!isExecutionMode(choice)) throw new HttpError(400, 'Choose AI, HUMAN, HYBRID or LATER.');
-  const cap = routeCapability(work.capability);
-  if (!allowedModes(cap).includes(choice)) throw new HttpError(400, cap.requiresProfessional ? 'This work legally needs a qualified professional, so AI-only execution is not offered.' : 'That execution mode is not available for this work.');
-  const estimate = await db.costEstimate.findFirst({ where: { workId: work.id, mode: choice } });
+  const classification = classifyWork(work);
+  const cap = routeCapability(classification.capabilityId);
+  if (!classification.modes.includes(choice)) throw new HttpError(400, `${classification.summary} AI-only execution is not offered for this work.`);
+  let estimate = await db.costEstimate.findFirst({ where: { workId: work.id, mode: choice } });
+  if (choice === 'AI' && !estimate) {
+    // Briefs written before work classification had no AI estimate when the model guessed "not AI-feasible".
+    // The work's class allows AI, so compute the AI estimate from the stored effort (deterministic, labelled COMPUTED).
+    const ai = computeEstimates(normaliseEffort(briefRow.effort as Partial<EffortModel>, cap), cap, 3000, classification.modes).find((e) => e.mode === 'AI');
+    if (ai) estimate = await db.costEstimate.create({ data: { workId: work.id, mode: 'AI', low: ai.low, high: ai.high, label: ai.label, basis: ai.basis, breakdown: json(ai.breakdown), drivers: json(ai.drivers) } });
+  }
   if (choice === 'AI' && !estimate) throw new HttpError(400, 'AI cannot execute this work on its own.');
   const payment = workPaymentPlan(choice);
   await db.work.update({ where: { id: work.id }, data: { executionMode: choice, paymentStatus: payment.status, status: choice === 'HUMAN' ? 'WAITING_FOR_INPUT' : 'APPROVED' } });
@@ -248,7 +260,7 @@ export async function chooseExecution(ctx: { work: { id: string; organizationId:
 // ---------------------------------------------------------------- EXECUTION
 const STALE_MS = 3 * 60_000;
 
-export async function executeWork(ctx: { work: { id: string; organizationId: string; objectiveId: string; title: string; capability: string; status: string; executionMode: string | null }; objective: Objective }) {
+export async function executeWork(ctx: { work: { id: string; organizationId: string; objectiveId: string; title: string; capability: string; status: string; executionMode: string | null; description?: string; deliverable?: string }; objective: Objective }) {
   const { work, objective } = ctx;
   const mode = work.executionMode;
   if (mode !== 'AI' && mode !== 'HYBRID') throw new HttpError(409, 'Choose Hippoturtle (AI) or Hybrid before executing.');
@@ -259,21 +271,26 @@ export async function executeWork(ctx: { work: { id: string; organizationId: str
   // Atomic claim: only one execution at a time; a crashed run (stale IN_PROGRESS) can be retried.
   const claim = await db.work.updateMany({ where: { id: work.id, OR: [{ status: 'APPROVED' }, { status: 'IN_PROGRESS', updatedAt: { lt: new Date(Date.now() - STALE_MS) } }] }, data: { status: 'IN_PROGRESS' } });
   if (claim.count === 0) throw new HttpError(409, work.status === 'IN_PROGRESS' ? 'This work is already in progress.' : 'This work is not ready to execute.');
-  const cap = routeCapability(work.capability);
+  const classification = classifyWork(work);
+  if (!classification.modes.includes(mode)) { await db.work.update({ where: { id: work.id }, data: { status: 'AWAITING_DECISION', executionMode: null } }); throw new HttpError(409, `${classification.summary} Choose Hybrid or an external provider.`); }
+  const cap = routeCapability(classification.capabilityId);
   // Inputs are re-classified from provenance at execution time: an AI proposal stored as "KNOWN" by an older brief is still sent as a proposal.
-  const brief: BriefData = { objective: briefRow.objective, deliverable: briefRow.deliverable, inputs: classifyInputs(briefRow.inputs as BriefInput[], await provenanceFor(objective)), constraints: briefRow.constraints as BriefData['constraints'], successCriteria: briefRow.successCriteria as string[], expectedOutput: briefRow.expectedOutput, outOfScope: briefRow.outOfScope as string[], effort: {} };
+  const provenance = await provenanceFor(objective);
+  const brief: BriefData = { objective: briefRow.objective, deliverable: briefRow.deliverable, inputs: classifyInputs(briefRow.inputs as BriefInput[], provenance), constraints: briefRow.constraints as BriefData['constraints'], successCriteria: briefRow.successCriteria as string[], expectedOutput: briefRow.expectedOutput, outOfScope: briefRow.outOfScope as string[], effort: {} };
   const execution = await db.execution.create({ data: { workId: work.id, mode, status: 'RUNNING', input: json({ brief, capability: cap.id }) } });
   await logActivity({ organizationId: work.organizationId, objectiveId: objective.id, workId: work.id, type: 'EXECUTION_STARTED', actor: cap.internalName, message: `${cap.label} started "${work.title}" (${mode}).` });
   try {
     const memory = await memoryBrief(objective.organizationId, objective.id, 60);
     const research = objective.auditId ? (await getResearch(objective.auditId)) as ResearchRecord | null : null;
-    const r = await generateJson<unknown>('execute', executePrompt({ title: work.title, brief, cap, mode, memory, research: research ? researchBrief(research).slice(0, 12_000) : 'none', company: await companyFor(objective) }), EXECUTE_SCHEMA);
+    const r = await generateJson<unknown>('execute', executePrompt({ title: work.title, brief, cap, mode, memory, research: research ? researchBrief(research).slice(0, 12_000) : 'none', company: await companyFor(objective), classification }), EXECUTE_SCHEMA);
     const out = normaliseOutput(r.data, cap, mode);
     // Every AI-generated deliverable carries an explicit, unconditional AI-generated marker (also re-applied on
     // display/download, so it cannot be lost). It does not replace the structured truth statuses.
-    const taggedMarkdown = withAiProvenance(out.markdown, out);
-    const waiting = mode === 'HYBRID' || cap.requiresProfessional;
-    await db.execution.update({ where: { id: execution.id }, data: { status: waiting ? 'WAITING_FOR_REVIEW' : 'COMPLETED', provider: r.provider, model: r.model, output: taggedMarkdown, outputSummary: out.summary, inputTokens: r.inputTokens, outputTokens: r.outputTokens, costInr: r.costInr, input: json({ brief, capability: cap.id, assumptions: out.assumptions, founderInputsNeeded: out.founderInputsNeeded, professionalReviewRequired: out.professionalReviewRequired }), completedAt: new Date() } });
+    // Customer-facing deliverables: invented testimonials/social proof/statistics/certifications are labelled, never facts.
+    const guarded = isCustomerFacing(cap) ? guardMarketingClaims(out.markdown, provenance) : { markdown: out.markdown, claims: [] };
+    const taggedMarkdown = withAiProvenance(guarded.markdown, out);
+    const waiting = mode === 'HYBRID';
+    await db.execution.update({ where: { id: execution.id }, data: { status: waiting ? 'WAITING_FOR_REVIEW' : 'COMPLETED', provider: r.provider, model: r.model, output: taggedMarkdown, outputSummary: out.summary, inputTokens: r.inputTokens, outputTokens: r.outputTokens, costInr: r.costInr, input: json({ brief, capability: cap.id, tool: classification.tool?.id ?? null, executionClass: classification.executionClass, externalActions: classification.externalActions, claims: guarded.claims, assumptions: out.assumptions, founderInputsNeeded: out.founderInputsNeeded, professionalReviewRequired: out.professionalReviewRequired }), completedAt: new Date() } });
     await db.work.update({ where: { id: work.id }, data: { status: waiting ? 'WAITING_FOR_INPUT' : 'COMPLETED', completedAt: waiting ? null : new Date() } });
     await logAi(objective.organizationId, objective.id, work.id, r, cap.internalName);
     await logActivity({ organizationId: work.organizationId, objectiveId: objective.id, workId: work.id, type: 'EXECUTION_COMPLETED', actor: cap.internalName, message: `${waiting ? 'Draft ready for human review' : 'Completed'}: "${work.title}". Actual AI cost ₹${r.costInr.toFixed(2)}.` });

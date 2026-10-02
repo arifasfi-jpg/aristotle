@@ -31,6 +31,7 @@ export type AuditReport = {
   unknownEconomics?: UnknownMetric[];
   // Evidence layer (optional: older stored reports do not have these)
   decisionMemo?: DecisionMemo;
+  claimProvenance?: Partial<Record<import('./claim-provenance').NarrativeField, import('./claim-provenance').ClaimProvenance>>;
   evidence?: EvidenceClaim[];
   vulnerabilities: { risk: string; probability: 'Low' | 'Medium' | 'High'; impact: 'Low' | 'Medium' | 'High'; whyItMatters: string; mitigation: string }[];
   goToMarket: string[];

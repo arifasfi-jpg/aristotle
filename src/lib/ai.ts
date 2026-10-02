@@ -386,6 +386,8 @@ customer.icp
 
 customer.problem
   Describe: current workflow, existing workaround, frequency, economic cost of the problem.
+  Frequency, scale and cost are facts ONLY if the founder stated them or research found them: cite [F#] or [R#] inline.
+  Otherwise write them as "Hypothesis: …" (e.g. "Hypothesis: parents look for such books weekly") — never as fact.
   Use FACT / ASSUMPTION / HYPOTHESIS labels.
   FORBIDDEN: inventing customer research not in the founder's idea.
 
@@ -410,7 +412,8 @@ marketView.demandSignal
 marketView.competition
   Map what the customer can use TODAY. For each alternative: what they get, cost, weakness,
   advantage over this idea. Include do-nothing, manual workflow, existing software, funded rivals.
-  Mark every unverified claim as (INFERENCE).
+  Mark every unverified claim as (INFERENCE). A claim that competitors LACK something (personalisation, local content,
+  a feature) is a fact only with a research citation [R#]; otherwise write "Hypothesis: competitors may not …".
 
 marketView.marketRisk
   Single biggest market-level risk for this specific idea and operating model.

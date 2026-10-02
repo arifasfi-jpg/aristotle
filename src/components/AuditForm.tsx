@@ -9,7 +9,7 @@ type Fact = { id: string; concept: string; timeframe: string; value?: number; lo
 type ScopeView = { suggestion: Scope; reasons: string[]; outOfScopeMessage?: string; facts: Fact[]; notes: string[]; classifier?: { scope?: Scope; confidence?: number; confident?: boolean; error?: string } };
 
 const SCOPE_NAME: Record<Scope, string> = { NEW_IDEA: 'a New Business / Idea', GROWTH_PLAN: 'an Existing Business / Growth Plan', OUT_OF_SCOPE: 'outside Aristotle’s audit scope' };
-const CONCEPTS: [string, string][] = [['selling_price','Selling price'],['unit_cost','Unit cost'],['margin','Margin'],['volume','Volume'],['revenue','Revenue'],['customers','Customers'],['order_quantity','Units per order'],['aov','Average order value'],['marketing_budget','Marketing budget'],['shipping','Shipping'],['channel','Sales channel'],['start_year','Operating since'],['other','Other']];
+const CONCEPTS: [string, string][] = [['selling_price','Selling price'],['unit_cost','Unit cost'],['margin','Margin'],['volume','Volume'],['revenue','Revenue'],['customers','Customers'],['order_quantity','Units per order'],['aov','Average order value'],['marketing_budget','Marketing budget'],['shipping','Shipping'],['channel','Sales channel'],['start_year','Operating since'],['founder_age','Founder age'],['audience_age','Target audience age'],['other','Other']];
 const TIMEFRAMES: [string, string][] = [['CURRENT','Current'],['TARGET','Target'],['PROPOSED','Proposed / estimate'],['HISTORICAL','Historical'],['CONDITIONAL','Conditional']];
 
 export default function AuditForm(){

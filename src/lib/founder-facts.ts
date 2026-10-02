@@ -14,7 +14,7 @@
 
 export const FACT_CONCEPTS = [
   'selling_price', 'unit_cost', 'margin', 'volume', 'revenue', 'customers', 'order_quantity', 'aov',
-  'marketing_budget', 'shipping', 'channel', 'start_year', 'other',
+  'marketing_budget', 'shipping', 'channel', 'start_year', 'founder_age', 'audience_age', 'other',
 ] as const;
 export type FactConcept = (typeof FACT_CONCEPTS)[number];
 
@@ -35,6 +35,7 @@ export type FounderFact = {
   condition?: string;               // CONDITIONAL: "at 10,000 units"
   deadline?: string;                // TARGET: "October", "Diwali", "March"
   text?: string;                    // non-numeric facts (shipping terms, channels)
+  subject?: string;                 // WHAT the number is about, in the founder's words (e.g. physical books, kids, founder)
   raw: string;                      // exact founder wording of the number
   context: string;                  // sentence it came from
   timeframeEvidence: 'explicit' | 'inferred';
@@ -46,8 +47,10 @@ export type FounderFact = {
 export const CONCEPT_LABEL: Record<FactConcept, string> = {
   selling_price: 'Selling price', unit_cost: 'Unit cost', margin: 'Margin', volume: 'Volume', revenue: 'Revenue',
   customers: 'Customers', order_quantity: 'Units per order', aov: 'Average order value', marketing_budget: 'Marketing budget',
-  shipping: 'Shipping terms', channel: 'Sales channel', start_year: 'Operating since', other: 'Other number',
+  shipping: 'Shipping terms', channel: 'Sales channel', start_year: 'Operating since', founder_age: 'Founder age', audience_age: 'Target audience age', other: 'Other number',
 };
+/** Facts about people, not about the business's economics: never unit-economics rows. */
+export const NON_ECONOMIC_CONCEPTS: FactConcept[] = ['founder_age', 'audience_age'];
 export const TIMEFRAME_LABEL: Record<FactTimeframe, string> = {
   CURRENT: 'Current', TARGET: 'Target', PROPOSED: 'Proposed / estimate', HISTORICAL: 'Historical', CONDITIONAL: 'Conditional',
 };
@@ -170,6 +173,12 @@ function tokenise(sentence: string): Tok[] {
     if (!mult && /^(19|20)\d{2}$/.test(m[1])) { toks.push({ start, end, raw: m[0], kind: 'year', value }); continue; }
     if (DURATION_RE.test(after)) continue; // "2 years", "30 mins": durations are not commercial numbers
     if (noun) { toks.push({ start, end: end + noun[0].length, raw: (m[0] + noun[0]).trim(), kind: 'count', value, noun: noun[2].toLowerCase() }); continue; }
+    // Any plural noun phrase names what is counted ("5,000 physical books"): the number is bound to THAT, nothing else.
+    const phrase = !mult || mult === 'k' || mult === 'thousand' ? nounPhraseAfter(after) : null;
+    if (phrase) {
+      const len = after.toLowerCase().indexOf(phrase) + phrase.length;
+      toks.push({ start, end: end + len, raw: (m[0] + after.slice(0, len)).trim(), kind: 'count', value, noun: phrase }); continue;
+    }
     if (mult && mult !== 'k' && mult !== 'thousand') {
       // "8L/month", "₹-less 1 crore": lakh/crore amounts are money unless followed by a count noun
       const t: Tok = { start, end, raw: m[0].trim(), kind: 'money', value };
@@ -195,6 +204,65 @@ function nearestKeyword(before: string, after: string): FactConcept | null {
 const lastWords = (s: string, n: number) => s.split(/\s+/).filter(Boolean).slice(-n).join(' ');
 
 // ---------------------------------------------------------------------------
+// Semantic pre-pass: ages. Each number is bound to the phrase that GIVES it meaning ("I am 10 years old",
+// "kids aged 8 to 15"), and its span is masked so the generic number pass can never re-use it for anything else.
+// ---------------------------------------------------------------------------
+type AgeHit = { start: number; end: number; concept: 'founder_age' | 'audience_age'; value?: number; low?: number; high?: number; raw: string; subject: string };
+const PEOPLE = 'kids|children|child|students|teens|teenagers|toddlers|girls|boys|readers|learners|users|customers|people|parents|women|men|adults|seniors|youth';
+const FOUNDER_AGE_RES = [
+  /\b(?:i\s+am|i'm|im|i\s+turned|i\s+turn)\s+(?:now\s+|only\s+|just\s+)?(\d{1,3})(?:\s*-?\s*(?:years?|yrs?)(?:\s*-?\s*old)?|(?=\s*(?:,|\.|!|$|\band\b)))/i,
+  /\bmy\s+age\s+is\s+(\d{1,3})\b/i,
+  /\b(?:i\s+am|i'm)\s+an?\s+(\d{1,3})\s*-\s*years?\s*-\s*old\b/i,
+];
+const AUDIENCE_RANGE_RE = new RegExp(String.raw`\b(?:(${PEOPLE})\s+)?(?:aged|ages|age\s+group(?:\s+of)?|age\s+range(?:\s+of)?|between\s+the\s+ages\s+of)\s+(\d{1,2})\s*(?:-|to|and)\s*(\d{1,2})(?:\s*(?:years?|yrs?)(?:\s*-?\s*old)?)?`, 'i');
+const AUDIENCE_RANGE_RE2 = new RegExp(String.raw`\b(\d{1,2})\s*(?:-|to)\s*(\d{1,2})\s*-?\s*(?:years?|yrs?)\s*-?\s*(?:olds?|of\s+age)(?:\s+(${PEOPLE}))?`, 'i');
+const AUDIENCE_SINGLE_RE = new RegExp(String.raw`\b(${PEOPLE})\s+aged\s+(\d{1,2})\b(?!\s*(?:-|to|and)\s*\d)`, 'i');
+const PEOPLE_BEFORE_RE = new RegExp(String.raw`\b(${PEOPLE})\b[^.]{0,30}$`, 'i');
+const overlaps = (a: { start: number; end: number }, b: { start: number; end: number }) => a.start < b.end && a.end > b.start;
+
+function findAges(sentence: string): AgeHit[] {
+  const hits: AgeHit[] = [];
+  for (const re of FOUNDER_AGE_RES) {
+    const m = re.exec(sentence);
+    const v = m ? Number(m[1]) : 0;
+    if (m && v > 0 && v < 120 && !hits.some((h) => overlaps(h, { start: m.index, end: m.index + m[0].length }))) {
+      hits.push({ start: m.index, end: m.index + m[0].length, concept: 'founder_age', value: v, raw: m[0].trim(), subject: 'founder' });
+    }
+  }
+  const who = (explicit: string | undefined, at: number) => (explicit || PEOPLE_BEFORE_RE.exec(sentence.slice(0, at))?.[1] || 'target audience').toLowerCase();
+  const range = AUDIENCE_RANGE_RE.exec(sentence) || null;
+  if (range) {
+    hits.push({ start: range.index, end: range.index + range[0].length, concept: 'audience_age', low: Number(range[2]), high: Number(range[3]), raw: range[0].trim(), subject: who(range[1], range.index) });
+  } else {
+    const r2 = AUDIENCE_RANGE_RE2.exec(sentence);
+    if (r2) hits.push({ start: r2.index, end: r2.index + r2[0].length, concept: 'audience_age', low: Number(r2[1]), high: Number(r2[2]), raw: r2[0].trim(), subject: who(r2[3], r2.index) });
+    else {
+      const one = AUDIENCE_SINGLE_RE.exec(sentence);
+      if (one) hits.push({ start: one.index, end: one.index + one[0].length, concept: 'audience_age', value: Number(one[2]), raw: one[0].trim(), subject: one[1].toLowerCase() });
+    }
+  }
+  return hits.filter((h, i) => !hits.some((o, j) => j < i && overlaps(h, o)) && (h.low === undefined || h.low <= h.high!));
+}
+
+// A plural noun phrase right after a number names WHAT is counted ("5,000 physical books", "200 copies").
+const NOT_COUNTABLE = /^(?:years?|yrs?|months?|weeks?|days?|hours?|hrs?|minutes?|mins?|seconds?|percent|times|rupees|lakhs?|crores?|thousands?|millions?|olds?)$/i;
+const PHRASE_STOP = /^(?:and|or|per|a|an|the|to|of|in|on|by|for|at|from|with|each|every|this|that|these|those|my|our|your|we|i|is|are|was|be|will|would|can|into|than|more|less|month|week|day|year)$/i;
+function nounPhraseAfter(after: string): string | null {
+  const m = /^\s*((?:[a-z][a-z-]*\s+){0,2}[a-z][a-z-]*)/i.exec(after);
+  if (!m) return null;
+  const words = m[1].toLowerCase().split(/\s+/);
+  const cut = words.findIndex((w) => PHRASE_STOP.test(w));
+  const phrase = cut >= 0 ? words.slice(0, cut) : words;
+  for (let n = phrase.length; n > 0; n--) {
+    const head = phrase[n - 1];
+    if (/[a-z]s$/.test(head) && !/ss$/.test(head) && phrase.slice(0, n).every((w) => !NOT_COUNTABLE.test(w))) return phrase.slice(0, n).join(' ');
+  }
+  return null;
+}
+// A clause that starts with an action verb is a goal: "Sell 5,000 physical books", "Reach 1,000 users".
+const IMPERATIVE_GOAL = /(?:^|[,;:]\s*|\b(?:and|then|also)\s+)(?:to\s+)?(?:sell|reach|get|achieve|hit|publish|print|launch|acquire|onboard|win|sign\s+up|grow\s+to|scale\s+to)\s+(?:about\s+|around\s+|over\s+|at\s+least\s+)?$/i;
+
+// ---------------------------------------------------------------------------
 // Extraction
 // ---------------------------------------------------------------------------
 export type FactExtraction = { facts: FounderFact[]; notes: string[] };
@@ -207,7 +275,12 @@ export function extractFounderFacts(text: string): FactExtraction {
 
   for (const sentence of splitSentences(text)) {
     const lower = sentence.toLowerCase();
-    const toks = tokenise(sentence);
+    const ages = findAges(sentence);
+    for (const a of ages) {
+      facts.push({ ...base, concept: a.concept, timeframe: 'CURRENT', ...(a.low !== undefined ? { low: a.low, high: a.high } : { value: a.value }), unit: 'years', raw: a.raw, subject: a.subject, context: sentence, timeframeEvidence: 'explicit' });
+    }
+    // Numbers inside an age phrase are masked: they can never be read as a sales, price or other figure.
+    const toks = tokenise(ages.reduce((acc, a) => acc.slice(0, a.start) + ' '.repeat(a.end - a.start) + acc.slice(a.end), sentence));
     const arrowAt = sentence.indexOf('→');
 
     // Operating start year (historical, never a deadline)
@@ -251,7 +324,7 @@ export function extractFounderFacts(text: string): FactExtraction {
       const beforeArrow = arrowAt >= 0 && t.start < arrowAt;
       let condition: string | undefined;
       const condBefore = /\bat\s+(\d[\d,.]*\s*k?\s*[a-z]*)\s*$/i.exec(sentence.slice(0, t.start).replace(/\s+$/, ' '));
-      if (afterArrow || TARGET_CUE.test(recent + ' ') || TARGET_CUE.test(recent)) { timeframe = 'TARGET'; evidence = 'explicit'; }
+      if (afterArrow || TARGET_CUE.test(recent + ' ') || TARGET_CUE.test(recent) || (IMPERATIVE_GOAL.test(sentence.slice(0, t.start)) && !CURRENT_CUE.test(lastWords(before, 3)))) { timeframe = 'TARGET'; evidence = 'explicit'; }
       else if (beforeArrow) { timeframe = 'CURRENT'; evidence = 'explicit'; }
       else if (HYPOTHETICAL_CUE.test(before) || (HYPOTHETICAL_CUE.test(prefix) && !CURRENT_CUE.test(prefix))) { timeframe = 'PROPOSED'; evidence = 'explicit'; }
       else if (CURRENT_CUE.test(prefix) || CURRENT_CUE.test(before)) { timeframe = 'CURRENT'; evidence = 'explicit'; }
@@ -318,7 +391,7 @@ export function extractFounderFacts(text: string): FactExtraction {
         if (/average order (?:quantity|size)|units? per order|per order|\baov\b|order quantity/.test(before)) concept = 'order_quantity';
         // "At 10,000 units margin could reach 15%": volume that conditions a margin statement
         if (/\bat\s*$/.test(before.trimEnd() + ' ') && /margin/.test(sentence.slice(t.end).toLowerCase()) && !afterArrow) { timeframe = 'CONDITIONAL'; evidence = 'explicit'; }
-        push({ concept, timeframe, value: t.value, unit: concept === 'order_quantity' ? `${noun}/order` : `${noun}${period ? `/${period}` : ''}`, raw: t.raw, ...(period ? { period } : {}) });
+        push({ concept, timeframe, value: t.value, unit: concept === 'order_quantity' ? `${noun}/order` : `${noun}${period ? `/${period}` : ''}`, raw: t.raw, subject: noun, ...(period ? { period } : {}) });
         return;
       }
 
@@ -364,7 +437,7 @@ export function extractFounderFacts(text: string): FactExtraction {
 // ---------------------------------------------------------------------------
 // Founder confirmation → locked facts
 // ---------------------------------------------------------------------------
-export type FounderFactInput = Partial<Pick<FounderFact, 'concept' | 'timeframe' | 'value' | 'low' | 'high' | 'unit' | 'period' | 'condition' | 'deadline' | 'text' | 'raw' | 'context'>>;
+export type FounderFactInput = Partial<Pick<FounderFact, 'concept' | 'timeframe' | 'value' | 'low' | 'high' | 'unit' | 'period' | 'condition' | 'deadline' | 'text' | 'subject' | 'raw' | 'context'>>;
 
 const str = (v: unknown, max: number) => (typeof v === 'string' ? v.slice(0, max) : undefined);
 const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v < 1e13 ? v : typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v.replace(/,/g, ''))) ? Number(v.replace(/,/g, '')) : undefined);
@@ -397,6 +470,7 @@ export function confirmFounderFacts(input: unknown): FounderFact[] {
       ...(str(f.condition, 200) ? { condition: str(f.condition, 200) } : {}),
       ...(str(f.deadline, 80) ? { deadline: str(f.deadline, 80) } : {}),
       ...(text ? { text } : {}),
+      ...(str(f.subject, 80) ? { subject: str(f.subject, 80) } : {}),
       raw: str(f.raw, 300) || '',
       context: str(f.context, 500) || '',
       timeframeEvidence: 'explicit' as const,
@@ -421,7 +495,10 @@ export function formatFactValue(f: FounderFact): string {
 }
 
 export function describeFact(f: FounderFact): string {
-  return `${TIMEFRAME_LABEL[f.timeframe]} ${CONCEPT_LABEL[f.concept].toLowerCase()}: ${formatFactValue(f)}${f.deadline ? ` by ${f.deadline}` : ''}${f.condition ? ` (${f.condition})` : ''}`;
+  if (f.concept === 'founder_age') return `Founder age: ${formatFactValue(f)}`;
+  if (f.concept === 'audience_age') return `Target audience age${f.subject && f.subject !== 'target audience' ? ` (${f.subject})` : ''}: ${formatFactValue(f)}`;
+  const what = f.subject && !f.unit.toLowerCase().startsWith(f.subject.toLowerCase()) ? ` (${f.subject})` : '';
+  return `${TIMEFRAME_LABEL[f.timeframe]} ${CONCEPT_LABEL[f.concept].toLowerCase()}${what}: ${formatFactValue(f)}${f.deadline ? ` by ${f.deadline}` : ''}${f.condition ? ` (${f.condition})` : ''}`;
 }
 
 /** Prompt block: confirmed facts by ID. Empty when there are none (NEW_IDEA prompt unchanged). */

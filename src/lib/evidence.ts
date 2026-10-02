@@ -11,6 +11,7 @@
 // File-based (ProjectFile) and additive, so a future evidence table / cross-audit intelligence can be
 // introduced without reshaping reports.
 // ---------------------------------------------------------------------------
+import { narrativeProvenance } from './claim-provenance';
 import type { FounderFact } from './founder-facts';
 
 export const CLAIM_TYPES = ['FACT', 'FOUNDER', 'CALCULATION', 'ASSUMPTION', 'HYPOTHESIS', 'INFERENCE'] as const;
@@ -225,7 +226,8 @@ export function validateEvidence<T extends ReportLike>(report: T, research: Rese
   }
 
   return {
-    report: { ...report, evidence, ...(decisionMemo ? { decisionMemo } : {}), ...(regulatory ? { regulatory } : {}), ...(unitEconomics ? { unitEconomics } : {}), ...(strict || unknownEconomics.length ? { unknownEconomics } : {}) },
+    // Prose claims (problem, competition, demand…) carry their provenance: sourced, founder, inference or hypothesis.
+    report: { ...report, evidence, claimProvenance: narrativeProvenance(report as Parameters<typeof narrativeProvenance>[0], { research: new Set([...sourceIds, ...findingById.keys()]), facts: factIds }), ...(decisionMemo ? { decisionMemo } : {}), ...(regulatory ? { regulatory } : {}), ...(unitEconomics ? { unitEconomics } : {}), ...(strict || unknownEconomics.length ? { unknownEconomics } : {}) },
     log,
   };
 }

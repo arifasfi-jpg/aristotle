@@ -46,6 +46,9 @@ export type ResearchRecord = {
   questions?: ResearchQuestion[];
   findings?: Finding[];
   usage?: { inputTokens: number; outputTokens: number; tavilySearches: number };
+  /** 'PLANNED' = checkpoint after the planning call only (no searches yet); absent = complete research. */
+  stage?: 'PLANNED';
+  plan?: { businessModel: BusinessModel; questions: Omit<ResearchQuestion, 'status' | 'sourceIds' | 'findingIds'>[] };
 };
 
 export type EvidenceClaim = { claim: string; type: ClaimType; sourceIds: string[]; confidence: Confidence; validation: string; verified?: boolean; note?: string };

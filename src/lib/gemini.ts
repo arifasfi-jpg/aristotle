@@ -11,33 +11,59 @@ export function cleanJson(text: string): string {
   return first >= 0 && last > first ? trimmed.slice(first, last + 1) : trimmed;
 }
 
-export async function callGeminiJson<T>(opts: { prompt: string; schema: unknown; timeoutMs: number; maxOutputTokens: number; temperature?: number; label: string }): Promise<GeminiResult<T>> {
+export const geminiModel = () => process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
+
+/**
+ * Lowest-latency thinking setting the configured model accepts (thinking tokens add latency and count against
+ * maxOutputTokens). Gemini 3.x uses thinkingLevel ("minimal" only on Flash-Lite); Gemini 2.5 uses thinkingBudget
+ * (Pro cannot go to 0). Unknown models: send nothing. GEMINI_FAST_THINKING=off disables this entirely.
+ */
+export function fastThinkingConfig(model: string): Record<string, unknown> | undefined {
+  if (process.env.GEMINI_FAST_THINKING === 'off') return undefined;
+  const m = model.toLowerCase();
+  if (/^gemini-3/.test(m)) return { thinkingLevel: m.includes('flash-lite') ? 'minimal' : 'low' };
+  if (/^gemini-2\.5/.test(m)) return { thinkingBudget: m.includes('pro') ? 128 : 0 };
+  return undefined;
+}
+
+export async function callGeminiJson<T>(opts: { prompt: string; schema: unknown; timeoutMs: number; maxOutputTokens: number; temperature?: number; label: string; fastThinking?: boolean }): Promise<GeminiResult<T>> {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error('AI_ENGINE_NOT_CONFIGURED: GEMINI_API_KEY is missing');
+  const model = geminiModel();
+  const thinking = opts.fastThinking ? fastThinkingConfig(model) : undefined;
+  const started = Date.now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Math.max(1000, opts.timeoutMs));
+  const send = (withThinking: boolean) => fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+    signal: controller.signal,
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: opts.prompt }] }],
+      generationConfig: {
+        responseMimeType: 'application/json',
+        responseSchema: opts.schema,
+        maxOutputTokens: opts.maxOutputTokens,
+        ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+        ...(withThinking && thinking ? { thinkingConfig: thinking } : {}),
+      },
+    }),
+  });
   let res: Response;
   try {
-    res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite'}:generateContent`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-      signal: controller.signal,
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: opts.prompt }] }],
-        generationConfig: {
-          responseMimeType: 'application/json',
-          responseSchema: opts.schema,
-          maxOutputTokens: opts.maxOutputTokens,
-          ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
-        },
-      }),
-    });
+    res = await send(true);
+    // A model that rejects the thinking setting must not break the call: retry once without it (same deadline).
+    if (res.status === 400 && thinking) {
+      const body = await res.clone().text();
+      if (/thinking/i.test(body)) res = await send(false);
+    }
   } catch (e) {
     const aborted = e instanceof Error && e.name === 'AbortError';
-    throw new Error(`GEMINI_ERROR (${opts.label}): ${aborted ? `timed out after ${Math.round(opts.timeoutMs / 1000)}s` : e instanceof Error ? e.message : String(e)}`);
+    throw new Error(`GEMINI_ERROR (${opts.label}): ${aborted ? `timed out after ${Math.round(opts.timeoutMs / 1000)}s (model ${model})` : e instanceof Error ? e.message : String(e)}`);
   } finally {
     clearTimeout(timeout);
   }
+  if (opts.fastThinking) console.log(JSON.stringify({ event: 'gemini_call', label: opts.label, model, ms: Date.now() - started, status: res.status }));
   if (!res.ok) throw new Error(`GEMINI_ERROR (${opts.label}): HTTP ${res.status}: ${(await res.text()).slice(0, 400)}`);
   const json = (await res.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[]; usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number } };
   const text = json.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';

@@ -5,7 +5,7 @@ import { validateReport } from './report-validation';
 import type { Scope } from './routing';
 import { validateEvidence, type ResearchRecord } from './evidence';
 import { callGeminiJson } from './gemini';
-import { researchBusiness, researchBrief } from './research';
+import { isPlanCheckpoint, researchBusiness, researchBrief } from './research';
 
 // Whole audit must fit the 60s serverless limit of /api/payments/verify (DB work included).
 const AUDIT_BUDGET_MS = 54_000;
@@ -541,10 +541,13 @@ export async function runAudit(input: AuditInput, opts: { existingResearch?: Res
   console.log(JSON.stringify({ event: 'aristotle_audit_start', sector: input.sector, stage: input.stage, geography: input.geography, scope: input.scope, founderFacts: input.founderFacts?.length ?? 0, reusedResearch: Boolean(opts.existingResearch) }));
 
   // RESEARCH (or reuse)
-  let research = opts.existingResearch?.version === 2 ? opts.existingResearch : null;
+  // Complete research is reused as-is; a planning checkpoint resumes at the search stage (the plan is not redone).
+  const checkpoint = isPlanCheckpoint(opts.existingResearch) ? opts.existingResearch.plan : null;
+  let research = opts.existingResearch?.version === 2 && !checkpoint ? opts.existingResearch : null;
+  const reusedResearch = Boolean(research);
   if (!research) {
     const facts = (input.founderFacts || []).filter((f) => f.locked);
-    research = await researchBusiness({ idea: input.idea, sector: input.sector, stage: input.stage, geography: input.geography, founderFactsText: facts.map((f) => `${f.id}: ${f.concept} ${f.timeframe} ${f.raw}`).join('\n') }, deadline);
+    research = await researchBusiness({ idea: input.idea, sector: input.sector, stage: input.stage, geography: input.geography, founderFactsText: facts.map((f) => `${f.id}: ${f.concept} ${f.timeframe} ${f.raw}`).join('\n') }, deadline, undefined, { plan: checkpoint, onPlan: opts.onResearch });
     if (opts.onResearch) await opts.onResearch(research);
   }
   const answered = (research.questions || []).filter((q) => q.status === 'ANSWERED' || q.status === 'PARTIAL').length;
@@ -562,8 +565,8 @@ export async function runAudit(input: AuditInput, opts: { existingResearch?: Res
   const { report, log: evidenceLog } = validateEvidence(numbersChecked, research, input.founderFacts);
   console.log(JSON.stringify({ event: 'aristotle_evidence_validated', ...evidenceLog, corrected: log.corrected.length, insertedFacts: log.insertedFacts.length, proseConflicts: log.proseConflicts.length }));
 
-  const inputTokens = decision.inputTokens + (opts.existingResearch ? 0 : research.usage?.inputTokens ?? 0);
-  const outputTokens = decision.outputTokens + (opts.existingResearch ? 0 : research.usage?.outputTokens ?? 0);
+  const inputTokens = decision.inputTokens + (reusedResearch ? 0 : research.usage?.inputTokens ?? 0);
+  const outputTokens = decision.outputTokens + (reusedResearch ? 0 : research.usage?.outputTokens ?? 0);
   console.log(JSON.stringify({ event: 'aristotle_audit_complete', inputTokens, outputTokens, ms: Date.now() - start }));
   return { research, report, pricing: estimateCompute(inputTokens, outputTokens), provider: 'aristotle-research-v2' };
 }

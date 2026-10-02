@@ -22,6 +22,14 @@ export type Usage = { inputTokens: number; outputTokens: number; tavilySearches:
 
 const MIN_QUESTIONS = 4;
 const MAX_QUESTIONS = 8;
+const PLAN_QUESTIONS = 6;            // asked for; 4–8 accepted
+const PLAN_IDEA_CHARS = 2500;        // founder text sent to the planner
+export const PLAN_MAX_OUTPUT_TOKENS = 1500;
+/** Planner timeout: up to 20s, but always leaving 30s for search + extraction + decision. */
+export const PLAN_TIMEOUT_MAX_MS = 20_000;
+export const PLAN_RESERVE_MS = 30_000;
+export const PLAN_MIN_MS = 8_000;
+export const planTimeoutMs = (remainingMs: number) => Math.min(PLAN_TIMEOUT_MAX_MS, remainingMs - PLAN_RESERVE_MS);
 const SOURCE_CONTENT_CHARS = 6000;   // per source, sent to the extractor
 const STORED_CONTENT_CHARS = 2500;   // per source, persisted in research.json for traceability
 
@@ -60,29 +68,26 @@ const PLAN_SCHEMA = {
 };
 
 export function buildPlanPrompt(input: ResearchInput): string {
-  return `You are the research planner for Aristotle, an India-first venture intelligence system.
-Do NOT evaluate the idea yet. First understand exactly what this business is, then decide what must be researched.
+  // Planning only: understand the business and choose what to search. No evaluation, no prose — short fields
+  // keep the response small so this call stays fast (the evidence comes from search + extraction, not from here).
+  return `You are the research planner for Aristotle (India-first venture research). Plan what to search; do NOT evaluate the idea.
 
-BUSINESS IDEA (founder's words): """${input.idea.slice(0, 4000)}"""
-Sector chosen by founder: ${input.sector}
-Stage: ${input.stage || 'not stated'}
-Geography: ${input.geography || 'India'}
-${input.founderFactsText ? `Founder-confirmed facts:\n${input.founderFactsText}\n` : ''}
-1. businessModel — be concrete to THIS idea:
-   customer (who uses it), payer (who pays — may differ), offering (what is actually sold), revenueMechanism
-   (how money is charged), keyActivities (what the business must do day to day), regulatedActivities (only
-   activities that plausibly trigger regulation in this geography — e.g. handling personal data, payments,
-   lending, health, food, alcohol, matchmaking, tax filing on behalf of others — with why).
-2. questions — ${MIN_QUESTIONS + 2} to ${MAX_QUESTIONS} research questions whose answers decide whether THIS business works.
-   Cover: DEMAND (evidence people have this problem / search for or pay for solutions), ALTERNATIVES_PRICING
-   (who already serves these customers and what they charge), REGULATION (one question per regulated activity;
-   set "activity"), CHANNEL (how these customers are actually reached), COST (the main cost driver).
-   Each question must be specific to this business — never generic ("is there demand?", "is it profitable?").
-   query: a real web search query that would find evidence (named segment, product type, geography, year if
-   useful). Do NOT wrap the whole idea in quotes. Keep queries under 15 words.`;
+BUSINESS (founder's words): """${input.idea.slice(0, PLAN_IDEA_CHARS)}"""
+Sector: ${input.sector}. Stage: ${input.stage || 'not stated'}. Geography: ${input.geography || 'India'}.
+${input.founderFactsText ? `Founder-confirmed facts:\n${input.founderFactsText.slice(0, 1200)}\n` : ''}
+Return JSON. Be terse: plain phrases, no sentences longer than 20 words.
+businessModel: summary (max 25 words), customer, payer (who pays, may differ), offering, revenueMechanism (each max 12 words),
+  keyActivities (max 4, short), regulatedActivities (only activities that plausibly need a licence/regulation in this geography,
+  e.g. personal data, payments, lending, health devices/medicine, food, tax filing for others; each with whyRegulated, max 15 words).
+questions: exactly ${PLAN_QUESTIONS} questions specific to THIS business (never generic like "is there demand?").
+  Cover DEMAND, ALTERNATIVES_PRICING, CHANNEL, COST, and one REGULATION question per regulated activity (set "activity").
+  question max 20 words; whyItMatters max 12 words;
+  query = a real web search query under 12 words (product type, customer segment, India/city, year if useful). Never quote the whole idea.`;
 }
 
-export function normalisePlan(raw: unknown): { businessModel: BusinessModel; questions: Omit<ResearchQuestion, 'status' | 'sourceIds' | 'findingIds'>[] } {
+export type ResearchPlan = { businessModel: BusinessModel; questions: Omit<ResearchQuestion, 'status' | 'sourceIds' | 'findingIds'>[] };
+
+export function normalisePlan(raw: unknown): ResearchPlan {
   const r = (raw ?? {}) as { businessModel?: Partial<BusinessModel>; questions?: unknown[] };
   const bm = r.businessModel ?? {};
   const businessModel: BusinessModel = {
@@ -209,13 +214,24 @@ export function verifyFindings(raw: unknown, questionId: string, sources: Resear
 // ---------------------------------------------------------------------------
 const remaining = (deadline: number) => deadline - Date.now();
 
-export async function researchBusiness(input: ResearchInput, deadline: number, now = () => new Date()): Promise<ResearchRecord> {
+/** A research.json checkpoint written right after planning, so a retry never repeats a completed plan. */
+export const isPlanCheckpoint = (r: ResearchRecord | null | undefined): r is ResearchRecord & { stage: 'PLANNED'; plan: ResearchPlan } => r?.version === 2 && r.stage === 'PLANNED' && Boolean(r.plan);
+export const planCheckpoint = (plan: ResearchPlan, at: Date): ResearchRecord => ({ version: 2, stage: 'PLANNED', retrievedAt: at.toISOString(), queries: plan.questions.map((q) => q.query), sources: [], businessModel: plan.businessModel, plan });
+
+export async function researchBusiness(input: ResearchInput, deadline: number, now = () => new Date(), opts: { plan?: ResearchPlan | null; onPlan?: (checkpoint: ResearchRecord) => Promise<void> } = {}): Promise<ResearchRecord> {
   const usage: Usage = { inputTokens: 0, outputTokens: 0, tavilySearches: 0 };
 
-  // 1. PLAN
-  const plan = await callGeminiJson<unknown>({ label: 'research-plan', prompt: buildPlanPrompt(input), schema: PLAN_SCHEMA, maxOutputTokens: 3000, temperature: 0.2, timeoutMs: Math.min(12000, remaining(deadline) - 30000) });
-  usage.inputTokens += plan.inputTokens; usage.outputTokens += plan.outputTokens;
-  const { businessModel, questions: planned } = normalisePlan(plan.data);
+  // 1. PLAN (or reuse the plan saved by an earlier attempt)
+  let planResult = opts.plan ?? null;
+  if (!planResult) {
+    const timeoutMs = planTimeoutMs(remaining(deadline));
+    if (timeoutMs < PLAN_MIN_MS) throw new Error('AUDIT_TIME_BUDGET_EXCEEDED: not enough time left to plan research');
+    const plan = await callGeminiJson<unknown>({ label: 'research-plan', prompt: buildPlanPrompt(input), schema: PLAN_SCHEMA, maxOutputTokens: PLAN_MAX_OUTPUT_TOKENS, temperature: 0.1, timeoutMs, fastThinking: true });
+    usage.inputTokens += plan.inputTokens; usage.outputTokens += plan.outputTokens;
+    planResult = normalisePlan(plan.data);
+    if (opts.onPlan) await opts.onPlan(planCheckpoint(planResult, now()));
+  }
+  const { businessModel, questions: planned } = planResult;
 
   // 2. SEARCH (parallel)
   const searchTimeout = Math.min(15000, remaining(deadline) - 22000);

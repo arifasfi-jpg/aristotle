@@ -7,7 +7,7 @@ import { getLockedFacts, getResearch } from '../audit-meta';
 import type { ResearchRecord } from '../evidence';
 import { researchBrief } from '../research';
 import { allowedModes, getCapability, routeCapability } from './capabilities';
-import { HttpError, logActivity, memoryBrief, remember } from './context';
+import { HttpError, isUniqueViolation, logActivity, memoryBrief, remember } from './context';
 import { computeEstimates, midpoint, normaliseEffort } from './costs';
 import { comparePrompt, COMPARE_SCHEMA, EXECUTE_SCHEMA, executePrompt, normaliseOutput, positionQuote, rulesExplanation, type QuoteComparison } from './execution';
 import { aiMeta, generateJson, type GatewayResult } from './gateway';
@@ -46,8 +46,9 @@ export async function createObjective(ctx: { user: { id: string }; founder: { id
 export async function refreshObjective(objective: DbObjective): Promise<DbObjective> {
   if (!objective.auditId) return objective;
   const audit = await db.audit.findUnique({ where: { id: objective.auditId } });
-  if (audit && (audit.paymentStatus === 'paid' || audit.status === 'generating') && objective.stage === 'UNDERSTAND') {
-    await db.objective.update({ where: { id: objective.id }, data: { stage: 'RESEARCH' } });
+  // Atomic transition: only the request that actually moves UNDERSTAND → RESEARCH logs it (no duplicate log on concurrent loads).
+  if (audit && (audit.paymentStatus === 'paid' || audit.status === 'generating') && objective.stage === 'UNDERSTAND'
+    && (await db.objective.updateMany({ where: { id: objective.id, stage: 'UNDERSTAND' }, data: { stage: 'RESEARCH' } })).count === 1) {
     await logActivity({ organizationId: objective.organizationId, objectiveId: objective.id, type: 'ARISTOTLE_STARTED', actor: 'Aristotle', message: 'Aristotle started researching the objective.' });
   }
   await syncAristotle({ ...objective, stage: objective.stage === 'UNDERSTAND' ? 'RESEARCH' : objective.stage });
@@ -133,7 +134,7 @@ export async function prepareBrief(ctx: { work: { id: string; organizationId: st
   let saved;
   try {
     saved = await db.workBrief.create({ data: { workId: work.id, objective: brief.objective, deliverable: brief.deliverable, inputs: json(brief.inputs), constraints: json(brief.constraints), successCriteria: json(brief.successCriteria), expectedOutput: brief.expectedOutput, outOfScope: json(brief.outOfScope), effort: json(effort), provider: r.provider, model: r.model } });
-  } catch { return db.workBrief.findUniqueOrThrow({ where: { workId: work.id } }); } // concurrent request won
+  } catch (e) { if (!isUniqueViolation(e)) throw e; return db.workBrief.findUniqueOrThrow({ where: { workId: work.id } }); } // concurrent request won
   await db.costEstimate.createMany({ data: estimates.map((e) => ({ workId: work.id, mode: e.mode, low: e.low, high: e.high, label: e.label, basis: e.basis, breakdown: json(e.breakdown), drivers: json(e.drivers) })) });
   const primary = estimates.find((e) => e.mode === 'AI') || estimates.find((e) => e.mode === 'HYBRID') || estimates[0];
   await db.work.update({ where: { id: work.id }, data: { estimatedCost: primary ? Math.round(midpoint(primary) * 100) / 100 : null, status: ['READY', 'DRAFT'].includes(work.status) ? 'AWAITING_DECISION' : work.status } });

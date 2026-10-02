@@ -1,11 +1,27 @@
 // Identity, authorisation and the organisation's operating record (activity + business memory).
 // Every Hippoturtle read/write goes through these helpers so a founder can only reach their own organisation.
+import crypto from 'crypto';
 import type { Prisma } from '@prisma/client';
 import { db } from '../db';
 import { createSession, getCurrentUser } from '../session';
 import type { MemoryKind, TruthStatus } from './types';
 
 export class HttpError extends Error { constructor(public status: number, message: string) { super(message); } }
+
+/** Postgres unique-constraint violation surfaced by Prisma. */
+export const isUniqueViolation = (e: unknown) => (e as { code?: string } | null)?.code === 'P2002';
+
+/**
+ * Concurrency-safe upsert. Prisma's upsert on a compound unique key is "find, then create or update", so two
+ * requests can both miss the row and both try to create it; the loser gets P2002. Retrying once is safe:
+ * the row now exists, so the retry takes the update path.
+ */
+export async function upsertSafely<T>(op: () => Promise<T>): Promise<T> {
+  try { return await op(); } catch (e) { if (!isUniqueViolation(e)) throw e; return op(); }
+}
+
+/** Deterministic primary key so concurrent inserts of the same logical row collide on the PK and are skipped. */
+export const stableId = (prefix: string, ...parts: string[]) => `${prefix}_${crypto.createHash('sha256').update(parts.join('\u0000')).digest('hex').slice(0, 25)}`;
 
 /** Current founder + organisation. With `create`, a first-time visitor gets an anonymous account (same auth as Aristotle). */
 export async function getFounderContext(opts: { create?: boolean; name?: string } = {}) {
@@ -58,15 +74,19 @@ export type MemoryInput = {
 
 /** Structured business memory. Idempotent per (refType, refId) so syncs and retries never duplicate entries. */
 export async function remember(m: MemoryInput) {
-  if (m.refType && m.refId) {
-    const existing = await db.businessMemory.findFirst({ where: { organizationId: m.organizationId, refType: m.refType, refId: m.refId } });
-    if (existing) return existing;
-  }
-  return db.businessMemory.create({ data: {
+  const data = {
     organizationId: m.organizationId, objectiveId: m.objectiveId ?? null, kind: m.kind, title: m.title.slice(0, 300), detail: (m.detail || '').slice(0, 4000),
     value: m.value ?? null, status: m.status, source: m.source ?? null, sourceUrl: m.sourceUrl ?? null, owner: m.owner, confidence: m.confidence ?? null,
     refType: m.refType ?? null, refId: m.refId ?? null, occurredAt: m.occurredAt ?? new Date(),
-  } });
+  };
+  if (!(m.refType && m.refId)) return db.businessMemory.create({ data });
+  const where = { organizationId: m.organizationId, refType: m.refType, refId: m.refId };
+  const existing = await db.businessMemory.findFirst({ where });
+  if (existing) return existing;
+  // Same (org, refType, refId) → same primary key, so a concurrent request inserting the same entry is skipped (ON CONFLICT DO NOTHING).
+  const id = stableId('bm', m.organizationId, m.refType, m.refId);
+  await db.businessMemory.createMany({ data: [{ id, ...data }], skipDuplicates: true });
+  return (await db.businessMemory.findUnique({ where: { id } })) ?? db.businessMemory.findFirstOrThrow({ where });
 }
 
 /** Compact memory brief for AI capabilities (future agents read the organisation's memory, not chat history). */

@@ -8,7 +8,7 @@ import { getLockedFacts, getResearch } from '../audit-meta';
 import type { EvidenceClaim, ResearchRecord } from '../evidence';
 import { describeFact, extractFounderFacts, formatFactValue, type FounderFact } from '../founder-facts';
 import { aiMeta, generateJson } from './gateway';
-import { logActivity, remember } from './context';
+import { isUniqueViolation, logActivity, remember, stableId, upsertSafely } from './context';
 import { advanceTo, NOT_ESTABLISHED, type Understanding } from './types';
 
 // ---------------------------------------------------------------- UNDERSTAND
@@ -115,7 +115,8 @@ export async function syncAristotle(objective: { id: string; organizationId: str
 
   if (research?.businessModel) {
     const b = research.businessModel;
-    await db.businessIdea.upsert({ where: { objectiveId }, update: {}, create: { organizationId: orgId, objectiveId, summary: b.summary, customer: b.customer, payer: b.payer, offering: b.offering, revenueMechanism: b.revenueMechanism, keyActivities: b.keyActivities, regulatedActivities: b.regulatedActivities } });
+    const idea = { summary: b.summary, customer: b.customer, payer: b.payer, offering: b.offering, revenueMechanism: b.revenueMechanism, keyActivities: b.keyActivities, regulatedActivities: b.regulatedActivities };
+    await upsertSafely(() => db.businessIdea.upsert({ where: { objectiveId }, update: idea, create: { organizationId: orgId, objectiveId, ...idea } }));
     await remember({ organizationId: orgId, objectiveId, kind: 'IDEA', title: 'Business model (as understood by research)', detail: `${b.summary} Customer: ${b.customer}. Payer: ${b.payer}. Revenue: ${b.revenueMechanism}.`, status: 'INFERENCE', owner: 'Aristotle', refType: 'idea', refId: objectiveId });
   }
   if (research?.questions?.length) {
@@ -123,18 +124,25 @@ export async function syncAristotle(objective: { id: string; organizationId: str
   }
   for (const f of research?.findings || []) {
     const src = sourceById.get(f.sourceId);
-    await db.researchFinding.upsert({ where: { objectiveId_code: { objectiveId, code: f.id } }, update: {}, create: {
-      objectiveId, code: f.id, questionCode: f.questionId, statement: f.statement, quote: f.quote, sourceTitle: src?.title || 'Unknown source', sourceUrl: src?.url || '',
+    const finding = {
+      questionCode: f.questionId, statement: f.statement, quote: f.quote, sourceTitle: src?.title || 'Unknown source', sourceUrl: src?.url || '',
       retrievedAt: src?.retrievedAt ? new Date(src.retrievedAt) : null, geography: audit.geography || 'India', confidence: f.confidence,
-    } });
+    };
+    // Keyed on the existing unique (objectiveId, code): create if missing, otherwise refresh it from research.json
+    // (the same record for this audit, so a refresh/retry rewrites identical values). Safe under concurrent loads.
+    await upsertSafely(() => db.researchFinding.upsert({ where: { objectiveId_code: { objectiveId, code: f.id } }, update: finding, create: { objectiveId, code: f.id, ...finding } }));
     await remember({ organizationId: orgId, objectiveId, kind: 'FACT', title: f.statement, detail: `“${f.quote}”`, status: 'VERIFIED_FACT', source: src?.title || f.sourceId, sourceUrl: src?.url, confidence: f.confidence, owner: 'Aristotle', refType: 'finding', refId: `${objectiveId}:${f.id}`, occurredAt: src?.retrievedAt ? new Date(src.retrievedAt) : undefined });
   }
   for (const q of (research?.questions || []).filter((q) => q.status !== 'ANSWERED')) {
     await remember({ organizationId: orgId, objectiveId, kind: 'FACT', title: q.question, detail: `Research status: ${q.status}. ${q.whyItMatters}`, status: 'UNKNOWN', owner: 'Aristotle', refType: 'question', refId: `${objectiveId}:${q.id}` });
   }
   const evidence: EvidenceClaim[] = Array.isArray(report.evidence) ? report.evidence : [];
-  if (evidence.length && !(await db.evidence.count({ where: { objectiveId } }))) {
-    await db.evidence.createMany({ data: evidence.map((e) => ({ objectiveId, claim: e.claim, type: e.type, status: e.type === 'FACT' && e.sourceIds?.length ? 'VERIFIED_FACT' : CLAIM_TO_TRUTH[e.type] || 'INFERENCE', sourceRefs: e.sourceIds || [], confidence: e.confidence, validation: e.validation || '' })) });
+  if (evidence.length) {
+    // Evidence has no natural unique key: skip claims already stored (e.g. by an earlier partial run) and give the rest
+    // deterministic ids, so concurrent syncs insert each claim exactly once (ON CONFLICT DO NOTHING on the primary key).
+    const have = new Set((await db.evidence.findMany({ where: { objectiveId }, select: { type: true, claim: true } })).map((e) => `${e.type}\u0000${e.claim}`));
+    const rows = evidence.filter((e) => !have.has(`${e.type}\u0000${e.claim}`)).map((e) => ({ id: stableId('ev', objectiveId, e.type, e.claim), objectiveId, claim: e.claim, type: e.type, status: e.type === 'FACT' && e.sourceIds?.length ? 'VERIFIED_FACT' : CLAIM_TO_TRUTH[e.type] || 'INFERENCE', sourceRefs: e.sourceIds || [], confidence: e.confidence, validation: e.validation || '' }));
+    if (rows.length) await db.evidence.createMany({ data: rows, skipDuplicates: true });
   }
   for (const f of facts) await rememberFounderFact(orgId, objectiveId, f);
   for (const [i, a] of (report.decisionMemo?.criticalAssumptions || []).entries()) {
@@ -149,7 +157,7 @@ export async function syncAristotle(objective: { id: string; organizationId: str
 
   try {
     await db.decisionMemo.create({ data: { objectiveId, auditId: audit.id, content: report as unknown as Prisma.InputJsonValue } });
-  } catch { return 'already'; } // concurrent sync: unique(objectiveId) makes exactly one win
+  } catch (e) { if (isUniqueViolation(e)) return 'already'; throw e; } // concurrent sync: unique(objectiveId) makes exactly one win; it alone logs
   await db.objective.update({ where: { id: objectiveId }, data: { stage: advanceTo(objective.stage, 'DECISION'), lastError: null } });
   await logActivity({ organizationId: orgId, objectiveId, type: 'RESEARCH_COMPLETED', actor: 'Aristotle', message: `Research completed: ${research?.questions?.length ?? 0} questions, ${research?.findings?.length ?? 0} sourced findings.` });
   await logActivity({ organizationId: orgId, objectiveId, type: 'DECISION_GENERATED', actor: 'Aristotle', message: `Decision memo ready: ${report.oneLineVerdict || report.verdict || 'see memo'}`.slice(0, 300) });

@@ -14,6 +14,7 @@ import { aiMeta, generateJson, type GatewayResult } from './gateway';
 import { BRIEF_SCHEMA, briefPrompt, normaliseBrief, normalisePlan, PLAN_SCHEMA, planPrompt, type BriefData } from './mogli';
 import { normalisePathways, PATHWAYS_SCHEMA, pathwaysPrompt } from './pathways';
 import { canExecuteNow, workPaymentPlan } from './payments';
+import { classifyInputs, itemKey, type BriefInput, type ProvenanceContext } from './provenance';
 import { ensureAudit, parseReport, syncAristotle, understandObjective } from './aristotle';
 import { advanceTo, businessName, DEMO_COMPANY_NAME, isExecutionMode, isGenericOrgName, PROVIDER_TIERS, type EffortModel, type PathwaysResult, type Understanding } from './types';
 
@@ -24,6 +25,16 @@ const json = (v: unknown) => v as Prisma.InputJsonValue;
 /** The founder's business name for AI prompts (null when unnamed). Never the platform's own name. */
 async function companyFor(organizationId: string) {
   return businessName((await db.organization.findUnique({ where: { id: organizationId }, select: { name: true } }))?.name);
+}
+
+/** Everything an input value may legitimately trace to: the founder's words, confirmed facts, approvals, verified findings. */
+export async function provenanceFor(objective: { id: string; organizationId: string; text: string; auditId: string | null }): Promise<ProvenanceContext> {
+  const [facts, findings, approvals] = await Promise.all([
+    objective.auditId ? getLockedFacts(objective.auditId) : Promise.resolve([]),
+    db.researchFinding.findMany({ where: { objectiveId: objective.id }, select: { code: true, statement: true, quote: true } }),
+    db.businessMemory.findMany({ where: { organizationId: objective.organizationId, objectiveId: objective.id, refType: 'founder_approval', status: 'FOUNDER_STATED' }, select: { detail: true, value: true } }),
+  ]);
+  return { objectiveText: objective.text, facts, findings, approvals: approvals.map((a) => ({ item: a.detail, value: a.value || '' })) };
 }
 
 async function logAi(orgId: string, objectiveId: string, workId: string | null, r: GatewayResult<unknown>, actor: string) {
@@ -134,10 +145,11 @@ export async function prepareBrief(ctx: { work: { id: string; organizationId: st
   if (existing) return existing;
   const cap = routeCapability(work.capability);
   const memory = await memoryBrief(objective.organizationId, objective.id);
-  const prompt = briefPrompt({ work, cap, objective: objective.text, memory, timeCommitment: ctx.founder.timeCommitment, company: await companyFor(objective.organizationId) });
+  const provenance = await provenanceFor(objective);
+  const prompt = briefPrompt({ work, cap, objective: objective.text, memory, timeCommitment: ctx.founder.timeCommitment, company: await companyFor(objective.organizationId), facts: provenance.facts, findings: provenance.findings });
   const r = await generateJson<unknown>('brief', prompt, BRIEF_SCHEMA);
   await logAi(objective.organizationId, objective.id, work.id, r, 'Mogli');
-  const brief = normaliseBrief(r.data, cap);
+  const brief = normaliseBrief(r.data, cap, provenance);
   const effort = normaliseEffort(brief.effort as Partial<EffortModel>, cap);
   const promptTokens = Math.round((prompt.length + memory.length) / 4);
   const estimates = computeEstimates(effort, cap, promptTokens);
@@ -192,7 +204,8 @@ export async function executeWork(ctx: { work: { id: string; organizationId: str
   const claim = await db.work.updateMany({ where: { id: work.id, OR: [{ status: 'APPROVED' }, { status: 'IN_PROGRESS', updatedAt: { lt: new Date(Date.now() - STALE_MS) } }] }, data: { status: 'IN_PROGRESS' } });
   if (claim.count === 0) throw new HttpError(409, work.status === 'IN_PROGRESS' ? 'This work is already in progress.' : 'This work is not ready to execute.');
   const cap = routeCapability(work.capability);
-  const brief: BriefData = { objective: briefRow.objective, deliverable: briefRow.deliverable, inputs: briefRow.inputs as BriefData['inputs'], constraints: briefRow.constraints as BriefData['constraints'], successCriteria: briefRow.successCriteria as string[], expectedOutput: briefRow.expectedOutput, outOfScope: briefRow.outOfScope as string[], effort: {} };
+  // Inputs are re-classified from provenance at execution time: an AI proposal stored as "KNOWN" by an older brief is still sent as a proposal.
+  const brief: BriefData = { objective: briefRow.objective, deliverable: briefRow.deliverable, inputs: classifyInputs(briefRow.inputs as BriefInput[], await provenanceFor(objective)), constraints: briefRow.constraints as BriefData['constraints'], successCriteria: briefRow.successCriteria as string[], expectedOutput: briefRow.expectedOutput, outOfScope: briefRow.outOfScope as string[], effort: {} };
   const execution = await db.execution.create({ data: { workId: work.id, mode, status: 'RUNNING', input: json({ brief, capability: cap.id }) } });
   await logActivity({ organizationId: work.organizationId, objectiveId: objective.id, workId: work.id, type: 'EXECUTION_STARTED', actor: cap.internalName, message: `${cap.label} started "${work.title}" (${mode}).` });
   try {
@@ -258,3 +271,17 @@ export async function recordOutcome(ctx: { org: Org; objective: Objective; work?
 
 export const capabilityOf = (id: string) => getCapability(id) ?? routeCapability(id);
 export { parseReport };
+
+// ---------------------------------------------------------------- FOUNDER APPROVAL OF A PROPOSED INPUT
+/** The founder explicitly approves an AI-proposed brief input. Only this turns a proposal into a founder-approved value. */
+export async function approveInput(ctx: { work: { id: string; organizationId: string; title: string }; objective: { id: string; organizationId: string; text: string; auditId: string | null } }, input: { item: string; value: string }) {
+  const { work, objective } = ctx;
+  const brief = await db.workBrief.findUnique({ where: { workId: work.id } });
+  if (!brief) throw new HttpError(409, 'The work brief has not been written yet.');
+  const current = classifyInputs(brief.inputs as BriefInput[], await provenanceFor(objective)).find((i) => itemKey(i.item) === itemKey(input.item) && i.value === input.value);
+  if (!current) throw new HttpError(400, 'That input is not in this work brief.');
+  if (current.status !== 'PROPOSED') return { approved: false, status: current.status };
+  await remember({ organizationId: work.organizationId, objectiveId: objective.id, kind: 'DECISION', title: `Founder approved: ${input.item} = ${input.value}`, detail: input.item, value: input.value, status: 'FOUNDER_STATED', owner: 'Founder', source: 'Founder approval', refType: 'founder_approval', refId: `${objective.id}:${itemKey(input.item)}:${input.value}` });
+  await logActivity({ organizationId: work.organizationId, objectiveId: objective.id, workId: work.id, type: 'FOUNDER_DECISION', actor: 'Founder', message: `Founder approved the AI-proposed value for "${input.item}": ${input.value}` });
+  return { approved: true, status: 'KNOWN' as const };
+}

@@ -7,10 +7,12 @@ import { HttpError, requireWork } from '@/lib/hippo/context';
 import { LABELS } from '@/lib/hippo/costs';
 import type { QuoteComparison } from '@/lib/hippo/execution';
 import { workPaymentPlan } from '@/lib/hippo/payments';
+import { classifyInputs, INPUT_LABEL, proposedLabel, type BriefInput } from '@/lib/hippo/provenance';
+import { provenanceFor } from '@/lib/hippo/service';
 import type { EffortModel } from '@/lib/hippo/types';
 import Markdown from '@/components/hippo/Markdown';
 import { AutoRefresh } from '@/components/hippo/Status';
-import { AutoBrief, ChooseMode, ExecuteButton, OutcomeForm, QuoteForm, type Option } from '@/components/hippo/WorkActions';
+import { ApproveInput, AutoBrief, ChooseMode, ExecuteButton, OutcomeForm, QuoteForm, type Option } from '@/components/hippo/WorkActions';
 import { Badge, Card, Eyebrow, inr, inrRange, List, Shell, when, WorkStatus } from '@/components/hippo/ui';
 
 export const dynamic = 'force-dynamic';
@@ -32,6 +34,8 @@ export default async function WorkPage({ params }: { params: Promise<{ id: strin
     db.execution.findMany({ where: { workId: work.id }, orderBy: { startedAt: 'desc' } }),
     db.outcome.findMany({ where: { workId: work.id }, orderBy: { createdAt: 'desc' } }),
   ]);
+  // Provenance is re-derived on every view: an AI proposal never shows as Known unless the founder stated or approved it.
+  const inputs = brief ? classifyInputs(brief.inputs as BriefInput[], await provenanceFor(objective)) : [];
   const est = (m: string) => estimates.find((e) => e.mode === m);
   const modes = allowedModes(cap);
   const effort = brief?.effort as EffortModel | undefined;
@@ -59,7 +63,11 @@ export default async function WorkPage({ params }: { params: Promise<{ id: strin
           <div className="mt-4">
             <Block title="Objective"><p className="text-sm leading-6">{brief.objective}</p></Block>
             <Block title="Deliverable"><p className="text-sm font-semibold leading-6">{brief.deliverable}</p></Block>
-            <Block title="Inputs">{(brief.inputs as { item: string; status: string; value: string }[]).length ? <ul className="space-y-1.5 text-sm">{(brief.inputs as { item: string; status: string; value: string }[]).map((i, k) => <li key={k} className="flex flex-wrap items-center gap-2">{i.status === 'KNOWN' ? <Badge tone="green">Known</Badge> : <Badge tone="amber">Needed from you</Badge>}<span className="font-semibold">{i.item}</span>{i.value && <span className="text-[#5B6478]">— {i.value}</span>}</li>)}</ul> : <List items={[]} />}</Block>
+            <Block title="Inputs">{inputs.length ? <ul className="space-y-2 text-sm">{inputs.map((i, k) => <li key={k} className="flex flex-wrap items-center gap-2">
+              {i.status === 'KNOWN' ? <Badge tone={i.source === 'RESEARCH' ? 'green' : 'blue'}>{INPUT_LABEL[i.source || 'FOUNDER']}{i.sourceRef ? ` · ${i.sourceRef}` : ''}</Badge> : i.status === 'PROPOSED' ? <Badge tone="amber">{proposedLabel(i.item, i.value)}</Badge> : <Badge tone="amber">Needed from you</Badge>}
+              <span className="font-semibold">{i.item}</span>{i.value && <span className="text-[#5B6478]">— {i.value}</span>}
+              {i.status === 'PROPOSED' && <ApproveInput workId={work.id} item={i.item} value={i.value} />}
+            </li>)}</ul> : <List items={[]} />}</Block>
             <Block title="Constraints"><div className="grid gap-2 text-sm sm:grid-cols-2">{Object.entries(brief.constraints as Record<string, string>).map(([k, v]) => <div key={k} className="rounded-xl bg-[#FBF7EF] p-3"><div className="text-[10px] font-bold uppercase tracking-wider text-[#6B7389]">{k}</div><div className={`mt-0.5 ${v === 'Not set by founder' ? 'italic text-[#8A6A3B]' : ''}`}>{v}</div></div>)}</div></Block>
             <Block title="Success criteria"><List items={brief.successCriteria as string[]} /></Block>
             <Block title="Expected output"><p className="text-sm leading-6">{brief.expectedOutput}</p></Block>

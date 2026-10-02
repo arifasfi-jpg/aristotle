@@ -2,6 +2,8 @@
 // writes structured Work Briefs and routes each piece of work to a capability.
 import { enabledCapabilities, routeCapability, type Capability } from './capabilities';
 import { identityBlock, type Pathway, type Understanding, type WorkPlanItem } from './types';
+import { describeFact, type FounderFact } from '../founder-facts';
+import { classifyInputs, type BriefInput, type ProvenanceContext } from './provenance';
 
 // ---------------------------------------------------------------- WORK GENERATION
 export const PLAN_SCHEMA = {
@@ -69,7 +71,7 @@ export const BRIEF_SCHEMA = {
   type: 'object',
   properties: {
     objective: { type: 'string' }, deliverable: { type: 'string' },
-    inputs: { type: 'array', items: { type: 'object', properties: { item: { type: 'string' }, status: { type: 'string', enum: ['KNOWN', 'NEEDED'] }, value: { type: 'string' } }, required: ['item', 'status', 'value'] } },
+    inputs: { type: 'array', items: { type: 'object', properties: { item: { type: 'string' }, status: { type: 'string', enum: ['KNOWN', 'PROPOSED', 'NEEDED'] }, value: { type: 'string' }, sourceRef: { type: 'string' } }, required: ['item', 'status', 'value', 'sourceRef'] } },
     constraints: { type: 'object', properties: { budget: { type: 'string' }, deadline: { type: 'string' }, geography: { type: 'string' }, brand: { type: 'string' }, technology: { type: 'string' }, regulatory: { type: 'string' } }, required: ['budget', 'deadline', 'geography', 'brand', 'technology', 'regulatory'] },
     successCriteria: { type: 'array', items: { type: 'string' } },
     expectedOutput: { type: 'string' },
@@ -86,7 +88,7 @@ export const BRIEF_SCHEMA = {
   required: ['objective', 'deliverable', 'inputs', 'constraints', 'successCriteria', 'expectedOutput', 'outOfScope', 'effort'],
 };
 
-export function briefPrompt(input: { work: { title: string; description: string; deliverable: string }; cap: Capability; objective: string; memory: string; timeCommitment: string | null; company?: string | null }): string {
+export function briefPrompt(input: { work: { title: string; description: string; deliverable: string }; cap: Capability; objective: string; memory: string; timeCommitment: string | null; company?: string | null; facts?: FounderFact[]; findings?: { code: string; statement: string }[] }): string {
   return `You are Mogli, Chief of Staff at Hippoturtle. Write a precise WORK BRIEF so that ANY executor (AI, freelancer, agency)
 must deliver exactly the same thing. Vague briefs let providers overcharge or under-deliver; be specific.
 ${identityBlock(input.company ?? null)}
@@ -95,14 +97,25 @@ WORK: ${input.work.title}
 Description: ${input.work.description}
 Deliverable: ${input.work.deliverable}
 Capability: ${input.cap.label}${input.cap.requiresProfessional ? ' — REGULATED: a qualified professional must review/sign where the law requires' : ''}
-Company objective: """${input.objective}"""
+FOUNDER OBJECTIVE (verbatim, founder stated): """${input.objective}"""
 Founder's available time: ${input.timeCommitment || 'not stated'}
 
-BUSINESS MEMORY (use KNOWN facts from here; anything else the executor needs is NEEDED):
+FOUNDER-CONFIRMED FACTS (cite as sourceRef):
+${(input.facts || []).map((f) => `${f.id}: ${describeFact(f)} — "${f.raw}"`).join('\n') || 'none'}
+
+SOURCED RESEARCH FINDINGS (cite as sourceRef):
+${(input.findings || []).map((f) => `${f.code}: ${f.statement}`).join('\n') || 'none'}
+
+BUSINESS MEMORY (grouped by provenance):
 ${input.memory}
 
 RULES:
-- inputs: what the executor needs. status KNOWN only if it is in business memory (put the value); otherwise NEEDED with value "".
+- inputs: what the executor needs, each with provenance:
+  KNOWN only if the value is stated in the founder objective (sourceRef "OBJECTIVE"), a founder fact (sourceRef "F#"),
+  a founder approval, or a sourced finding (sourceRef "R#"). Copy the value exactly.
+  PROPOSED for any value that only appears in Aristotle's validation experiments, pathways, assumptions, earlier work
+  briefs/outputs or your own suggestion (e.g. a test price) — it is NOT founder-approved. sourceRef "AI".
+  NEEDED with value "" for anything else. Never mark as NEEDED something the founder objective or facts already state.
 - constraints: budget/deadline only if the founder stated them, else "Not set by founder". geography: India unless stated otherwise.
 - successCriteria: 3–6 checkable criteria. outOfScope: 2–5 things explicitly NOT included (protects the founder from scope creep).
 - effort: your best ESTIMATE of the human effort for this deliverable (hours), the specialist type, an assumed Indian hourly rate range
@@ -114,12 +127,13 @@ Simple English. JSON only.`;
 }
 
 export type BriefData = {
-  objective: string; deliverable: string; inputs: { item: string; status: 'KNOWN' | 'NEEDED'; value: string }[];
+  objective: string; deliverable: string; inputs: BriefInput[];
   constraints: Record<'budget' | 'deadline' | 'geography' | 'brand' | 'technology' | 'regulatory', string>;
   successCriteria: string[]; expectedOutput: string; outOfScope: string[]; effort: Record<string, unknown>;
 };
 
-export function normaliseBrief(raw: unknown, cap: Capability): BriefData {
+/** `provenance` re-derives each input's status deterministically (the model's KNOWN is never trusted on its own). */
+export function normaliseBrief(raw: unknown, cap: Capability, provenance: ProvenanceContext = { objectiveText: '', facts: [], findings: [], approvals: [] }): BriefData {
   const r = (raw || {}) as Partial<BriefData>;
   const s = (v: unknown, n = 800) => (typeof v === 'string' ? v.trim().slice(0, n) : '');
   const list = (v: unknown, n = 8) => (Array.isArray(v) ? v.map((x) => s(x, 300)).filter(Boolean).slice(0, n) : []);
@@ -129,7 +143,7 @@ export function normaliseBrief(raw: unknown, cap: Capability): BriefData {
   if (cap.requiresProfessional && !/professional|lawyer|ca\b|chartered/i.test(constraints.regulatory)) constraints.regulatory += ' A qualified professional must review and approve where required by law.';
   const brief: BriefData = {
     objective: s(r.objective), deliverable: s(r.deliverable),
-    inputs: (Array.isArray(r.inputs) ? r.inputs : []).slice(0, 12).map((i) => ({ item: s(i?.item, 200), status: i?.status === 'KNOWN' && s(i?.value, 300) ? 'KNOWN' as const : 'NEEDED' as const, value: i?.status === 'KNOWN' ? s(i?.value, 300) : '' })).filter((i) => i.item),
+    inputs: classifyInputs(Array.isArray(r.inputs) ? r.inputs : [], provenance),
     constraints, successCriteria: list(r.successCriteria, 6), expectedOutput: s(r.expectedOutput), outOfScope: list(r.outOfScope, 5),
     effort: (r.effort || {}) as Record<string, unknown>,
   };

@@ -28,7 +28,7 @@ DELIVERABLE: ${input.brief.deliverable}
 EXPECTED OUTPUT: ${input.brief.expectedOutput}
 SUCCESS CRITERIA:\n${input.brief.successCriteria.map((c) => `- ${c}`).join('\n')}
 OUT OF SCOPE:\n${input.brief.outOfScope.map((c) => `- ${c}`).join('\n')}
-INPUTS:\n${input.brief.inputs.map((i) => `- ${i.item}: ${i.status === 'KNOWN' ? i.value : 'NOT PROVIDED'}`).join('\n')}
+INPUTS:\n${input.brief.inputs.map((i) => `- ${i.item}: ${i.status === 'KNOWN' ? `${i.value} (${i.source === 'RESEARCH' ? 'sourced research' : i.source === 'FOUNDER_APPROVED' ? 'founder approved' : 'founder stated'})` : i.status === 'PROPOSED' ? `${i.value} — AI-PROPOSED, NOT founder-approved: use only as a test hypothesis and label it as such` : 'NOT PROVIDED'}`).join('\n')}
 CONSTRAINTS: ${Object.entries(input.brief.constraints).map(([k, v]) => `${k}: ${v}`).join(' | ')}
 
 BUSINESS MEMORY (the only facts you may treat as true):

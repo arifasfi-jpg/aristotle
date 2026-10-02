@@ -89,9 +89,20 @@ export async function remember(m: MemoryInput) {
   return (await db.businessMemory.findUnique({ where: { id } })) ?? db.businessMemory.findFirstOrThrow({ where });
 }
 
-/** Compact memory brief for AI capabilities (future agents read the organisation's memory, not chat history). */
+/**
+ * Memory brief for AI capabilities, grouped by provenance so a proposal can never read like a fact:
+ * founder-stated / sourced facts first, then AI proposals and records, explicitly marked as NOT facts.
+ */
 export async function memoryBrief(organizationId: string, objectiveId: string, limit = 40): Promise<string> {
   const rows = await db.businessMemory.findMany({ where: { organizationId, OR: [{ objectiveId }, { objectiveId: null }] }, orderBy: { occurredAt: 'desc' }, take: limit });
   if (!rows.length) return 'No business memory yet.';
-  return rows.map((r) => `- [${r.status}] ${r.kind}: ${r.title}${r.value ? ` = ${r.value}` : ''}${r.source ? ` (source: ${r.source})` : ''}`).join('\n');
+  const line = (r: (typeof rows)[number]) => `- ${r.kind}: ${r.title}${r.value ? ` = ${r.value}` : ''}${r.source ? ` (source: ${r.source})` : ''}`;
+  const group = (title: string, pick: (r: (typeof rows)[number]) => boolean) => { const g = rows.filter(pick); return g.length ? `${title}\n${g.map(line).join('\n')}` : ''; };
+  return [
+    group('FOUNDER-STATED OR FOUNDER-APPROVED (may be treated as known):', (r) => r.status === 'FOUNDER_STATED'),
+    group('SOURCED RESEARCH (known only as far as the source says):', (r) => r.status === 'VERIFIED_FACT'),
+    group('AI PROPOSALS, HYPOTHESES, ASSUMPTIONS AND INFERENCES — NOT FACTS, never "known", never founder-approved:', (r) => ['ASSUMPTION', 'HYPOTHESIS', 'INFERENCE'].includes(r.status)),
+    group('NOT YET ESTABLISHED:', (r) => r.status === 'UNKNOWN'),
+    group('RECORDS OF DECISIONS AND WORK (what happened; any numbers inside them are not founder facts unless listed above):', (r) => r.status === 'RECORD'),
+  ].filter(Boolean).join('\n\n');
 }

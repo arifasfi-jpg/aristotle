@@ -117,3 +117,17 @@ export function OutcomeForm({ url, prompt = 'What happened?' }: { url: string; p
     <ErrorNote msg={err} />
   </div>;
 }
+
+/** Founder explicitly approves an AI-proposed input (e.g. a validation price). Until then it stays "not founder-approved". */
+export function ApproveInput({ workId, item, value }: { workId: string; item: string; value: string }) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+  async function approve() {
+    setBusy(true); setErr('');
+    try { await post(`/api/hippo/work/${workId}/approve-input`, { item, value }); router.refresh(); }
+    catch (e) { setErr(e instanceof Error ? e.message : 'Could not record approval.'); }
+    finally { setBusy(false); }
+  }
+  return <span className="inline-flex items-center gap-2"><button type="button" onClick={approve} disabled={busy} className="rounded-full border border-[#D9D0BF] bg-white px-2.5 py-0.5 text-[11px] font-bold text-[#0B1533] hover:border-[#0B1533] disabled:opacity-50">{busy ? 'Saving…' : 'I approve this value'}</button>{err && <span className="text-[11px] text-[#A3271B]">{err}</span>}</span>;
+}

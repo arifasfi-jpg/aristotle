@@ -142,7 +142,7 @@ export async function syncAristotle(objective: { id: string; organizationId: str
     // Evidence has no natural unique key: skip claims already stored (e.g. by an earlier partial run) and give the rest
     // deterministic ids, so concurrent syncs insert each claim exactly once (ON CONFLICT DO NOTHING on the primary key).
     const have = new Set((await db.evidence.findMany({ where: { objectiveId }, select: { type: true, claim: true } })).map((e) => `${e.type}\u0000${e.claim}`));
-    const rows = evidence.filter((e) => !have.has(`${e.type}\u0000${e.claim}`)).map((e) => ({ id: stableId('ev', objectiveId, e.type, e.claim), objectiveId, claim: e.claim, type: e.type, status: e.type === 'FACT' && e.sourceIds?.length ? 'VERIFIED_FACT' : CLAIM_TO_TRUTH[e.type] || 'INFERENCE', sourceRefs: e.sourceIds || [], confidence: e.confidence, validation: e.validation || '' }));
+    const rows = evidence.filter((e) => !have.has(`${e.type}\u0000${e.claim}`)).map((e) => ({ id: stableId('ev', objectiveId, e.type, e.claim), objectiveId, claim: e.claim, type: e.type, status: e.type === 'FACT' && e.sourceIds?.length ? 'VERIFIED_FACT' : e.type === 'FOUNDER' && !(e.sourceIds || []).some((x) => /^F\d+$/.test(x)) ? 'INFERENCE' : CLAIM_TO_TRUTH[e.type] || 'INFERENCE', sourceRefs: e.sourceIds || [], confidence: e.confidence, validation: e.validation || '' }));
     if (rows.length) await db.evidence.createMany({ data: rows, skipDuplicates: true });
   }
   for (const f of facts) await rememberFounderFact(orgId, objectiveId, f);

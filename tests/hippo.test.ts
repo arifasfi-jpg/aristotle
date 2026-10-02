@@ -61,8 +61,11 @@ describe('Mogli: work generation and briefs', () => {
     expect(p.work.map((w) => [w.capability, w.aiExecutable, w.priority, w.pathwayId])).toEqual([['marketing', true, 1, 'P1'], ['legal_regulatory', false, 5, undefined], ['strategy', true, 2, undefined]]);
   });
   it('brief inputs marked KNOWN without a value become NEEDED; unset budget stays "Not set by founder"', () => {
-    const b = normaliseBrief({ objective: 'o', deliverable: 'd', inputs: [{ item: 'Price', status: 'KNOWN', value: '' }, { item: 'Volume', status: 'KNOWN', value: '1,400/month' }], constraints: { geography: 'India' }, successCriteria: ['c'], expectedOutput: 'e', outOfScope: [], effort: {} }, getCapability('legal_regulatory')!);
+    const raw = { objective: 'o', deliverable: 'd', inputs: [{ item: 'Price', status: 'KNOWN', value: '' }, { item: 'Volume', status: 'KNOWN', value: '1,400/month' }], constraints: { geography: 'India' }, successCriteria: ['c'], expectedOutput: 'e', outOfScope: [], effort: {} };
+    const b = normaliseBrief(raw, getCapability('legal_regulatory')!, { objectiveText: 'We sell 1,400 units a month.', facts: [], findings: [], approvals: [] });
     expect(b.inputs.map((i) => i.status)).toEqual(['NEEDED', 'KNOWN']);
+    // Without founder provenance the model's "KNOWN" is not trusted: it is an AI proposal.
+    expect(normaliseBrief(raw, getCapability('legal_regulatory')!).inputs.map((i) => i.status)).toEqual(['NEEDED', 'PROPOSED']);
     expect(b.constraints.budget).toBe('Not set by founder');
     expect(b.constraints.regulatory).toMatch(/professional/i);
   });

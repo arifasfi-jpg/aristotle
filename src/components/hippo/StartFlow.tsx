@@ -13,6 +13,7 @@ type Direction = { title: string; whoItServes: string; whyYou: string; firstTest
 export default function StartFlow({ demoCheckout }: { demoCheckout: boolean }) {
   const [text, setText] = useState('');
   const [time, setTime] = useState<string | null>(null);
+  const [company, setCompany] = useState('');
   const [demo, setDemo] = useState(false);
   const [explore, setExplore] = useState(false);
   const [about, setAbout] = useState('');
@@ -23,7 +24,7 @@ export default function StartFlow({ demoCheckout }: { demoCheckout: boolean }) {
 
   async function submit() {
     setBusy(true); setErr('');
-    try { setResult(await post('/api/hippo/objectives', { text, mode: dirs.length ? 'EXPLORE' : 'IDEA', timeCommitment: time, demo })); }
+    try { setResult(await post('/api/hippo/objectives', { text, mode: dirs.length ? 'EXPLORE' : 'IDEA', timeCommitment: time, demo, companyName: company.trim() || null })); }
     catch (e) { setErr(e instanceof Error ? e.message : 'Something went wrong.'); }
     finally { setBusy(false); }
   }
@@ -61,6 +62,13 @@ export default function StartFlow({ demoCheckout }: { demoCheckout: boolean }) {
         {dirs.length > 0 && <div className="mt-4 grid gap-3 md:grid-cols-3">{dirs.map((d) => <button type="button" key={d.title} onClick={() => { setText(d.objective); setDemo(false); }} className="rounded-xl border border-[#E9E2D4] bg-white p-4 text-left text-sm hover:border-[#4F46E5]"><div className="text-[10px] font-bold uppercase tracking-wider text-[#D9670A]">Hypothesis to test</div><div className="mt-1 font-bold">{d.title}</div><p className="mt-1 text-[#5B6478]">{d.whoItServes}</p><p className="mt-2 text-xs text-[#6B7389]">First test: {d.firstTest}</p><div className="mt-2 text-xs font-bold text-[#4F46E5]">Use this →</div></button>)}</div>}
       </div>}
 
+      <div className="mt-6">
+        <label htmlFor="company" className="text-sm font-bold">Your company or business name <span className="font-normal text-[#6B7389]">(optional)</span></label>
+        <input id="company" value={demo ? '' : company} onChange={(e) => setCompany(e.target.value)} maxLength={120} disabled={demo}
+          placeholder={demo ? 'Demo Glucose Technologies (fictional demo business)' : 'e.g. Sharma Medical Supplies'}
+          className="mt-2 w-full rounded-xl border border-[#E1D8C6] bg-[#FBF7EF] px-4 py-2.5 text-sm outline-none focus:border-[#4F46E5] focus:bg-white disabled:opacity-70" />
+        <p className="mt-1 text-xs text-[#6B7389]">This is your business. Hippoturtle is the organisation that works for it.</p>
+      </div>
       <div className="mt-6">
         <div className="text-sm font-bold">How much time can you spend?</div>
         <div className="mt-2 flex flex-wrap gap-2">{TIME_COMMITMENTS.map((t) => <button type="button" key={t} onClick={() => setTime(time === t ? null : t)} className={`rounded-full border px-3.5 py-1.5 text-sm ${time === t ? 'border-[#0B1533] bg-[#0B1533] text-white' : 'border-[#D9D0BF] bg-white'}`}>{t}</button>)}</div>

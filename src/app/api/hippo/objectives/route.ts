@@ -10,6 +10,7 @@ const schema = z.object({
   mode: z.enum(['IDEA', 'EXPLORE']).default('IDEA'),
   timeCommitment: z.enum(TIME_COMMITMENTS).nullish(),
   name: z.string().trim().max(100).nullish(),
+  companyName: z.string().trim().max(120).nullish(),
   demo: z.boolean().optional(),
 });
 
@@ -18,6 +19,6 @@ export async function POST(req: Request) {
     const b = schema.parse(await req.json());
     const ctx = await getFounderContext({ create: true, name: b.name || undefined });
     if (!ctx?.founder || !ctx.org) throw new Error('could not create founder context');
-    return createObjective({ user: ctx.user, founder: ctx.founder, org: ctx.org }, { text: b.text, mode: b.mode, timeCommitment: b.timeCommitment, isDemo: b.demo });
+    return createObjective({ user: ctx.user, founder: ctx.founder, org: ctx.org }, { text: b.text, mode: b.mode, timeCommitment: b.timeCommitment, isDemo: b.demo, companyName: b.companyName });
   });
 }

@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { ArrowRight, Brain, CheckCircle2, CircleDollarSign, FlaskConical, Gavel, Layers } from 'lucide-react';
 import { db } from '@/lib/db';
 import { getFounderContext } from '@/lib/hippo/context';
-import { stageIndex, STAGES, type Understanding } from '@/lib/hippo/types';
+import { businessName, stageIndex, STAGES, type Understanding } from '@/lib/hippo/types';
 import { Stepper, WorkCard } from '@/components/hippo/Workflow';
 import { Badge, Card, Eyebrow, inr, Shell, TruthBadge, when } from '@/components/hippo/ui';
 
@@ -33,11 +33,12 @@ export default async function Company() {
   const progress = current ? Math.round((stageIndex(current.stage) / (STAGES.length - 1)) * 100) : 0;
 
   return <Shell active="company">
-    <div className="flex flex-wrap items-end justify-between gap-4"><div><Eyebrow>My company</Eyebrow><h1 className="mt-1 text-3xl font-extrabold tracking-tight">{ctx.org.name}{ctx.org.isDemo && <span className="ml-2 align-middle"><Badge tone="amber">DEMO DATA</Badge></span>}</h1><p className="mt-1 text-[#5B6478]">Your company’s operating system — objectives, work, decisions and what actually happened.</p></div><Link href="/start" className="inline-flex items-center gap-2 rounded-2xl bg-[#0B1533] px-5 py-3 text-sm font-bold text-white">New objective <ArrowRight size={15}/></Link></div>
+    <div className="flex flex-wrap items-end justify-between gap-4"><div><Eyebrow>My company</Eyebrow><h1 className="mt-1 text-3xl font-extrabold tracking-tight">{businessName(ctx.org.name) || 'Your business (not named yet)'}{ctx.org.isDemo && <span className="ml-2 align-middle"><Badge tone="amber">DEMO DATA — fictional business</Badge></span>}</h1><p className="mt-1 text-xs font-semibold text-[#4F46E5]">Operated with Hippoturtle</p><p className="mt-1 text-[#5B6478]">Your company’s operating system — objectives, work, decisions and what actually happened.</p></div><Link href="/start" className="inline-flex items-center gap-2 rounded-2xl bg-[#0B1533] px-5 py-3 text-sm font-bold text-white">New objective <ArrowRight size={15}/></Link></div>
 
     {current ? <Link href={`/objectives/${current.id}`} className="mt-6 block overflow-hidden rounded-[24px] ht-hero p-6 text-white sm:p-8">
       <div className="flex flex-wrap items-center gap-2 text-[11px] font-bold uppercase tracking-[.16em] text-[#FFB067]">Current objective{current.isDemo && <span className="rounded-full bg-white/15 px-2 py-0.5 text-white">Demo data</span>}</div>
-      <div className="mt-2 max-w-4xl text-xl font-extrabold leading-snug sm:text-2xl">{u?.objective || current.text}</div>
+      <div className="mt-2 max-w-4xl text-lg font-bold leading-snug sm:text-xl">“{current.text}”</div>
+      <div className="mt-1 text-xs text-white/60">Founder objective · founder stated</div>
       {u && <div className="mt-3 flex flex-wrap gap-2 text-sm"><span className="rounded-full bg-white/10 px-3 py-1">Target: {u.target}</span><span className="rounded-full bg-white/10 px-3 py-1">Today: {u.currentState}</span></div>}
       <div className="mt-6 rounded-2xl bg-white p-4 text-[#0B1533]"><div className="mb-2 flex justify-between text-xs font-bold"><span>Journey stage</span><span>{progress}%</span></div><Stepper stage={current.stage} /></div>
     </Link> : <Card className="mt-6"><p>No objective yet. <Link href="/start" className="font-bold text-[#4F46E5] underline">Start with an idea</Link>.</p></Card>}

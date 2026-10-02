@@ -148,3 +148,104 @@ describe.skipIf(!E2E)('Preview-only demo objective access (real Postgres)', () =
     expect(renderToStaticMarkup(await (await import('@/app/start/page')).default())).toContain('Open Demo Objective');
   });
 });
+
+describe.skipIf(!E2E)('Demo identity: Hippoturtle operates the demo business, it is never the business (real Postgres)', () => {
+  it('A–I: opening the demo gives it a separate fictional company; nothing else changes', async () => {
+    preview();
+    const { DEMO_COMPANY_NAME } = await import('@/lib/hippo/types');
+    const { objective, org, audit, user } = await paidObjective({ isDemo: false });
+    // The reported state: the business had no name of its own / carried the platform's name.
+    await db.organization.update({ where: { id: org.id }, data: { name: 'Hippoturtle' } });
+    process.env.HIPPO_PREVIEW_DEMO_OBJECTIVE_ID = objective.id;
+    const factsBefore = (await db.projectFile.findFirst({ where: { auditId: audit.id, path: 'founder-facts.json' } })).content;
+    const objectivesBefore = await db.objective.count();
+    const auditsBefore = await db.audit.count();
+    razorpay.ordersCreated = 0; razorpay.constructed = 0;
+
+    jar = new Map();
+    for (let i = 0; i < 3; i++) expect((await open()).status).toBe(303);
+
+    // A. no new objective (or audit)
+    expect(await db.objective.count()).toBe(objectivesBefore);
+    expect(await db.audit.count()).toBe(auditsBefore);
+    // B + C. the objective belongs to the demo founder's own, separately named, fictional company
+    const o = await db.objective.findUnique({ where: { id: objective.id } });
+    const company = await db.organization.findUnique({ where: { id: o.organizationId }, include: { founder: true } });
+    expect(company.id).toBe(org.id);
+    expect(company.founder.userId).toBe(user.id);
+    expect(company.name).toBe(DEMO_COMPANY_NAME);
+    expect(company.name).not.toMatch(/hippo\s*turtle/i);
+    expect(company).toMatchObject({ isDemo: true });
+    expect(o.isDemo).toBe(true);
+    // Founder-stated objective and facts are untouched.
+    expect(o.text).toBe('Grow glucometer sales to 10,000/month');
+    expect((await db.projectFile.findFirst({ where: { auditId: audit.id, path: 'founder-facts.json' } })).content).toBe(factsBefore);
+    expect((await db.audit.findUnique({ where: { id: audit.id } })).idea).toBe('glucometers');
+
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const Page = (await import('@/app/objectives/[id]/page')).default;
+    const Company = (await import('@/app/company/page')).default;
+    const Memory = (await import('@/app/memory/page')).default;
+    const page = renderToStaticMarkup(await Page({ params: Promise.resolve({ id: objective.id }) }));
+    // D. Aristotle still analyses the glucometer business
+    expect(page).toContain('Chemists are the main purchase point.');
+    expect(page).toContain('Diabetics'); // research businessModel.customer for the glucometer business
+    expect(await db.businessIdea.findUnique({ where: { objectiveId: objective.id } })).toMatchObject({ summary: 'Glucometers via pharmacies', offering: 'Glucometers' });
+    expect(page).toContain(DEMO_COMPANY_NAME);
+    expect(page).toContain('“Grow glucometer sales to 10,000/month”');
+    expect(page).toContain('Founder objective · founder stated');
+    // E. My company shows the demo company; F. branding stays Hippoturtle, and Hippoturtle is not the company
+    const dash = renderToStaticMarkup(await Company());
+    expect(dash).toMatch(new RegExp(`<h1[^>]*>${DEMO_COMPANY_NAME}`));
+    expect(dash).not.toMatch(/<h1[^>]*>Hippoturtle/);
+    expect(dash).toContain('>Hippoturtle</span>'); // logo
+    expect(dash).toContain('Operated with Hippoturtle');
+    expect(renderToStaticMarkup(await Memory())).toContain(`Business memory · ${DEMO_COMPANY_NAME}`);
+    // Business memory rows belong to the demo company, not to any global/Hippoturtle scope.
+    const memOrgs = await db.businessMemory.findMany({ where: { objectiveId: objective.id }, select: { organizationId: true }, distinct: ['organizationId'] });
+    expect(memOrgs).toEqual([{ organizationId: org.id }]);
+
+    // G. repeated opening/refreshing stays idempotent
+    const snapshot = { name: company.name, findings: await db.researchFinding.count({ where: { objectiveId: objective.id } }), memory: await db.businessMemory.count({ where: { organizationId: org.id } }), ideas: await db.businessIdea.count({ where: { objectiveId: objective.id } }), evidence: await db.evidence.count({ where: { objectiveId: objective.id } }) };
+    for (let i = 0; i < 3; i++) await open();
+    await Promise.all(Array.from({ length: 8 }, async () => renderToStaticMarkup(await Page({ params: Promise.resolve({ id: objective.id }) }))));
+    expect({ name: (await db.organization.findUnique({ where: { id: org.id } })).name, findings: await db.researchFinding.count({ where: { objectiveId: objective.id } }), memory: await db.businessMemory.count({ where: { organizationId: org.id } }), ideas: await db.businessIdea.count({ where: { objectiveId: objective.id } }), evidence: await db.evidence.count({ where: { objectiveId: objective.id } }) }).toEqual(snapshot);
+
+    // I. no Razorpay order/payment; payment reference unchanged
+    expect(razorpay).toEqual({ ordersCreated: 0, constructed: 0 });
+    expect(await db.audit.findUnique({ where: { id: audit.id } })).toMatchObject({ paymentStatus: 'paid', paymentRef: 'pay_TEST123' });
+  });
+
+  it('a name the founder gave their business is never overwritten by the demo name', async () => {
+    preview();
+    const { objective, org } = await paidObjective();
+    await db.organization.update({ where: { id: org.id }, data: { name: 'Sharma Medical Supplies' } });
+    process.env.HIPPO_PREVIEW_DEMO_OBJECTIVE_ID = objective.id;
+    jar = new Map(); await open();
+    expect((await db.organization.findUnique({ where: { id: org.id } })).name).toBe('Sharma Medical Supplies');
+  });
+
+  it('H. Production cannot reach the demo, and nothing is renamed', async () => {
+    const { objective, org } = await paidObjective({ isDemo: false });
+    process.env = { ...env, DEMO_MODE: 'true', VERCEL_ENV: 'production', HIPPO_PREVIEW_DEMO_OBJECTIVE_ID: objective.id } as NodeJS.ProcessEnv;
+    jar = new Map();
+    expect((await open()).status).toBe(404);
+    expect(await db.organization.findUnique({ where: { id: org.id } })).toMatchObject({ name: 'Org', isDemo: false });
+    expect(jar.size).toBe(0);
+  });
+
+  it('a founder can name their own business when starting; the platform name is never accepted as it', async () => {
+    delete process.env.GEMINI_API_KEY; // understanding falls back to the founder's own words (no AI needed here)
+    const { POST } = await import('@/app/api/hippo/objectives/route');
+    const post = (b: unknown) => POST(new Request('http://x', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b) }));
+    jar = new Map();
+    const r1 = await (await post({ text: 'We sell 200 ACs a month in Pune and want to reach 1,000.', companyName: 'CoolAir Pune' })).json();
+    const o1 = await db.objective.findUnique({ where: { id: r1.objectiveId }, include: { organization: true } });
+    expect(o1.organization.name).toBe('CoolAir Pune');
+    jar = new Map();
+    const r2 = await (await post({ text: 'We sell 200 ACs a month in Pune and want to reach 1,000.', companyName: 'Hippoturtle' })).json();
+    const o2 = await db.objective.findUnique({ where: { id: r2.objectiveId }, include: { organization: true } });
+    expect(o2.organization.name).toBe('My company'); // stays unnamed rather than becoming "Hippoturtle"
+  });
+});
+

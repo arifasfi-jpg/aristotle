@@ -15,25 +15,35 @@ import { BRIEF_SCHEMA, briefPrompt, normaliseBrief, normalisePlan, PLAN_SCHEMA, 
 import { normalisePathways, PATHWAYS_SCHEMA, pathwaysPrompt } from './pathways';
 import { canExecuteNow, workPaymentPlan } from './payments';
 import { ensureAudit, parseReport, syncAristotle, understandObjective } from './aristotle';
-import { advanceTo, isExecutionMode, PROVIDER_TIERS, type EffortModel, type PathwaysResult, type Understanding } from './types';
+import { advanceTo, businessName, DEMO_COMPANY_NAME, isExecutionMode, isGenericOrgName, PROVIDER_TIERS, type EffortModel, type PathwaysResult, type Understanding } from './types';
 
 type Org = { id: string };
 type Objective = { id: string; organizationId: string; text: string; stage: string; auditId: string | null; understanding: Prisma.JsonValue; selectedPathways: Prisma.JsonValue };
 const json = (v: unknown) => v as Prisma.InputJsonValue;
+
+/** The founder's business name for AI prompts (null when unnamed). Never the platform's own name. */
+async function companyFor(organizationId: string) {
+  return businessName((await db.organization.findUnique({ where: { id: organizationId }, select: { name: true } }))?.name);
+}
 
 async function logAi(orgId: string, objectiveId: string, workId: string | null, r: GatewayResult<unknown>, actor: string) {
   await logActivity({ organizationId: orgId, objectiveId, workId, type: 'AI_CALL', actor, message: `${actor} used ${r.provider}/${r.model} for ${r.task}`, meta: aiMeta(r) });
 }
 
 // ---------------------------------------------------------------- OBJECTIVE
-export async function createObjective(ctx: { user: { id: string }; founder: { id: string; name: string | null }; org: Org }, input: { text: string; mode: 'IDEA' | 'EXPLORE'; timeCommitment?: string | null; isDemo?: boolean }) {
+export async function createObjective(ctx: { user: { id: string }; founder: { id: string; name: string | null }; org: Org & { name?: string } }, input: { text: string; mode: 'IDEA' | 'EXPLORE'; timeCommitment?: string | null; isDemo?: boolean; companyName?: string | null }) {
   if (input.timeCommitment) await db.founder.update({ where: { id: ctx.founder.id }, data: { timeCommitment: input.timeCommitment } });
+  // The Organization is the founder's own business. Name it from the founder's input (or the fictional demo name),
+  // but never overwrite a name the founder already gave, and never use the platform's name.
+  const currentName = ctx.org.name ?? (await db.organization.findUnique({ where: { id: ctx.org.id }, select: { name: true } }))?.name;
+  const wanted = businessName(input.companyName) ?? (input.isDemo ? DEMO_COMPANY_NAME : null);
+  if (wanted && isGenericOrgName(currentName)) await db.organization.update({ where: { id: ctx.org.id }, data: { name: wanted } });
   if (input.isDemo) await db.organization.update({ where: { id: ctx.org.id }, data: { isDemo: true } });
   const objective = await db.objective.create({ data: { organizationId: ctx.org.id, text: input.text, mode: input.mode, isDemo: Boolean(input.isDemo) } });
   await logActivity({ organizationId: ctx.org.id, objectiveId: objective.id, type: 'OBJECTIVE_CREATED', actor: 'Founder', message: `Founder set an objective: ${input.text.slice(0, 160)}` });
   await remember({ organizationId: ctx.org.id, objectiveId: objective.id, kind: 'OBJECTIVE', title: input.text.slice(0, 300), status: 'FOUNDER_STATED', owner: 'Founder', source: input.isDemo ? 'Demo data' : 'Founder', refType: 'objective', refId: objective.id });
 
-  const u = await understandObjective(input.text);
+  const u = await understandObjective(input.text, await companyFor(ctx.org.id));
   if (u.meta) await logActivity({ organizationId: ctx.org.id, objectiveId: objective.id, type: 'AI_CALL', actor: 'Mogli', message: `Mogli used ${u.meta.provider}/${u.meta.model} for understand`, meta: u.meta });
   if (u.error) console.error('Hippoturtle understand fell back to founder numbers:', u.error);
   const updated = await db.objective.update({ where: { id: objective.id }, data: { understanding: json(u.understanding), stage: 'UNDERSTAND' } });
@@ -68,7 +78,7 @@ async function loadAristotle(objective: Objective) {
 export async function generatePathways(objective: Objective) {
   const { memo, report, research, facts } = await loadAristotle(objective);
   if (memo.pathways) return memo.pathways as unknown as PathwaysResult;
-  const r = await generateJson<unknown>('pathways', pathwaysPrompt({ objective: objective.text, understanding: objective.understanding as Understanding | null, facts, research, report }), PATHWAYS_SCHEMA);
+  const r = await generateJson<unknown>('pathways', pathwaysPrompt({ objective: objective.text, understanding: objective.understanding as Understanding | null, facts, research, report, company: await companyFor(objective.organizationId) }), PATHWAYS_SCHEMA);
   await logAi(objective.organizationId, objective.id, null, r, 'Aristotle');
   const result = normalisePathways(r.data, { findings: new Set((research?.findings || []).map((f) => f.id)), facts: new Set(facts.map((f) => f.id)) });
   await db.decisionMemo.update({ where: { id: memo.id }, data: { pathways: json(result), founderChecklist: json(result.founderChecklist) } });
@@ -104,7 +114,7 @@ export async function generateWork(objective: Objective) {
   const chosen = (result?.pathways || []).filter((p) => selected.includes(p.id));
   if (!chosen.length) throw new HttpError(409, 'Choose at least one pathway first.');
   const memory = await memoryBrief(objective.organizationId, objective.id);
-  const r = await generateJson<unknown>('plan', planPrompt({ objective: objective.text, understanding: objective.understanding as Understanding | null, pathways: chosen, experiments: report.experiments || [], thirtyDayPlan: report.thirtyDayPlan || [], memory }), PLAN_SCHEMA);
+  const r = await generateJson<unknown>('plan', planPrompt({ objective: objective.text, understanding: objective.understanding as Understanding | null, pathways: chosen, experiments: report.experiments || [], thirtyDayPlan: report.thirtyDayPlan || [], memory, company: await companyFor(objective.organizationId) }), PLAN_SCHEMA);
   await logAi(objective.organizationId, objective.id, null, r, 'Mogli');
   const plan = normalisePlan(r.data);
   if (await db.work.count({ where: { objectiveId: objective.id } })) return db.work.findMany({ where: { objectiveId: objective.id }, orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }] }); // concurrent request won
@@ -124,7 +134,7 @@ export async function prepareBrief(ctx: { work: { id: string; organizationId: st
   if (existing) return existing;
   const cap = routeCapability(work.capability);
   const memory = await memoryBrief(objective.organizationId, objective.id);
-  const prompt = briefPrompt({ work, cap, objective: objective.text, memory, timeCommitment: ctx.founder.timeCommitment });
+  const prompt = briefPrompt({ work, cap, objective: objective.text, memory, timeCommitment: ctx.founder.timeCommitment, company: await companyFor(objective.organizationId) });
   const r = await generateJson<unknown>('brief', prompt, BRIEF_SCHEMA);
   await logAi(objective.organizationId, objective.id, work.id, r, 'Mogli');
   const brief = normaliseBrief(r.data, cap);
@@ -188,7 +198,7 @@ export async function executeWork(ctx: { work: { id: string; organizationId: str
   try {
     const memory = await memoryBrief(objective.organizationId, objective.id, 60);
     const research = objective.auditId ? (await getResearch(objective.auditId)) as ResearchRecord | null : null;
-    const r = await generateJson<unknown>('execute', executePrompt({ title: work.title, brief, cap, mode, memory, research: research ? researchBrief(research).slice(0, 12_000) : 'none' }), EXECUTE_SCHEMA);
+    const r = await generateJson<unknown>('execute', executePrompt({ title: work.title, brief, cap, mode, memory, research: research ? researchBrief(research).slice(0, 12_000) : 'none', company: await companyFor(objective.organizationId) }), EXECUTE_SCHEMA);
     const out = normaliseOutput(r.data, cap, mode);
     const waiting = mode === 'HYBRID' || cap.requiresProfessional;
     await db.execution.update({ where: { id: execution.id }, data: { status: waiting ? 'WAITING_FOR_REVIEW' : 'COMPLETED', provider: r.provider, model: r.model, output: out.markdown, outputSummary: out.summary, inputTokens: r.inputTokens, outputTokens: r.outputTokens, costInr: r.costInr, input: json({ brief, capability: cap.id, assumptions: out.assumptions, founderInputsNeeded: out.founderInputsNeeded, professionalReviewRequired: out.professionalReviewRequired }), completedAt: new Date() } });

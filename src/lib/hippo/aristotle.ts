@@ -9,7 +9,7 @@ import type { EvidenceClaim, ResearchRecord } from '../evidence';
 import { describeFact, extractFounderFacts, formatFactValue, type FounderFact } from '../founder-facts';
 import { aiMeta, generateJson } from './gateway';
 import { isUniqueViolation, logActivity, remember, stableId, upsertSafely } from './context';
-import { advanceTo, NOT_ESTABLISHED, type Understanding } from './types';
+import { advanceTo, identityBlock, NOT_ESTABLISHED, type Understanding } from './types';
 
 // ---------------------------------------------------------------- UNDERSTAND
 const UNDERSTAND_SCHEMA = {
@@ -21,8 +21,9 @@ const UNDERSTAND_SCHEMA = {
   required: ['objective', 'target', 'currentState', 'keyQuestion', 'businessKind'],
 };
 
-export function understandPrompt(text: string): string {
+export function understandPrompt(text: string, company: string | null = null): string {
   return `You are Hippoturtle, an organisation that helps founders build companies. Restate what this founder is trying to achieve.
+${identityBlock(company)}
 Rules:
 - Use ONLY what the founder wrote. Do not add market data, prices or statistics.
 - Keep the founder's ambition exactly: never lower or "correct" their target.
@@ -47,9 +48,9 @@ export function understandFromNumbers(text: string): Understanding {
   };
 }
 
-export async function understandObjective(text: string): Promise<{ understanding: Understanding; meta?: ReturnType<typeof aiMeta>; error?: string }> {
+export async function understandObjective(text: string, company: string | null = null): Promise<{ understanding: Understanding; meta?: ReturnType<typeof aiMeta>; error?: string }> {
   try {
-    const r = await generateJson<Omit<Understanding, 'source'>>('understand', understandPrompt(text), UNDERSTAND_SCHEMA);
+    const r = await generateJson<Omit<Understanding, 'source'>>('understand', understandPrompt(text, company), UNDERSTAND_SCHEMA);
     const d = r.data;
     const s = (v: unknown, max = 400) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : 'Not stated yet');
     const kind = ['NEW_IDEA', 'EXISTING_BUSINESS', 'UNCLEAR'].includes(d.businessKind) ? d.businessKind : 'UNCLEAR';

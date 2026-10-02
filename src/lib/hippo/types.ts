@@ -95,3 +95,25 @@ export type EffortModel = {
   costDrivers: string[];
   rateBasis: string;
 };
+
+// ---------------------------------------------------------------- IDENTITY
+// Hippoturtle is the operating organisation. The founder's Organization row IS the founder's business.
+// Hippoturtle must never become the customer's business just because it is doing the work.
+export const DEFAULT_ORG_NAME = 'My company';
+/** Fictional name for the Preview/demo glucometer business. Not a real company. */
+export const DEMO_COMPANY_NAME = 'Demo Glucose Technologies';
+
+/** A name that does not identify the founder's business (never set, or mistakenly the platform's own name). */
+export const isGenericOrgName = (name: string | null | undefined) => !name || !name.trim() || name.trim() === DEFAULT_ORG_NAME || /hippo\s*turtle/i.test(name);
+
+/** The founder's business name, or null when the founder has not named it. Never returns "Hippoturtle". */
+export const businessName = (name: string | null | undefined): string | null => (isGenericOrgName(name) ? null : name!.trim());
+
+/** Prompt block that keeps the platform and the founder's business separate. */
+export function identityBlock(company: string | null): string {
+  const biz = company ? `"${company}"` : 'the founder\'s business (not named yet — call it "your business")';
+  return `IDENTITY (strict): Hippoturtle is the company-building organisation working FOR the founder, like an outsourced team.
+Hippoturtle is NOT the founder's business. The business being analysed and served is ${biz}.
+Never call that business Hippoturtle, never brand its products, pages, campaigns or documents as Hippoturtle, and never write
+as if Hippoturtle sells its products. Deliverables belong to ${company ? `"${company}"` : 'the founder\'s business'}.`;
+}

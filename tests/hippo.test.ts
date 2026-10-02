@@ -136,3 +136,31 @@ describe('Understanding, workflow and outputs', () => {
     expect(() => normaliseOutput({ markdown: 'short' }, getCapability('marketing')!, 'AI')).toThrow(/EXECUTION_INVALID/);
   });
 });
+
+describe('Identity: Hippoturtle is never the founder\'s business', () => {
+  it('every Hippoturtle prompt names the founder\'s business and forbids treating Hippoturtle as it', async () => {
+    const { identityBlock, businessName, isGenericOrgName, DEMO_COMPANY_NAME } = await import('../src/lib/hippo/types');
+    const { understandPrompt } = await import('../src/lib/hippo/aristotle');
+    const { planPrompt, briefPrompt } = await import('../src/lib/hippo/mogli');
+    const { executePrompt } = await import('../src/lib/hippo/execution');
+    const { pathwaysPrompt } = await import('../src/lib/hippo/pathways');
+    const company = DEMO_COMPANY_NAME;
+    const cap = getCapability('marketing')!;
+    const brief = { objective: 'o', deliverable: 'd', inputs: [], constraints: { budget: '', deadline: '', geography: '', brand: '', technology: '', regulatory: '' }, successCriteria: ['c'], expectedOutput: 'e', outOfScope: [], effort: {} };
+    const prompts = [
+      understandPrompt('grow glucometers', company),
+      pathwaysPrompt({ objective: 'grow', understanding: null, facts: [], research: null, report: {} as never, company }),
+      planPrompt({ objective: 'grow', understanding: null, pathways: [], experiments: [], thirtyDayPlan: [], memory: '', company }),
+      briefPrompt({ work: { title: 't', description: 'd', deliverable: 'x' }, cap, objective: 'grow', memory: '', timeCommitment: null, company }),
+      executePrompt({ title: 't', brief, cap, mode: 'AI', memory: '', research: '', company }),
+    ];
+    for (const p of prompts) { expect(p).toContain(`"${company}"`); expect(p).toContain('Hippoturtle is NOT the founder\'s business'); }
+    expect(identityBlock(null)).toContain('call it "your business"');
+    expect(businessName('Hippoturtle')).toBeNull();
+    expect(businessName('My company')).toBeNull();
+    expect(businessName('GlucoseCare India')).toBe('GlucoseCare India');
+    expect(isGenericOrgName('HippoTurtle Labs')).toBe(true);
+    expect(DEMO_COMPANY_NAME).not.toMatch(/hippo/i);
+  });
+});
+

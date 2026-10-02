@@ -5,6 +5,7 @@
 // browser into the account that owns that one objective. It is never available in Production.
 import { db } from '../db';
 import { isDemoMode } from '../payments';
+import { DEMO_COMPANY_NAME, isGenericOrgName } from './types';
 
 /** Same guard as Demo checkout: DEMO_MODE=true AND not Vercel Production AND not self-hosted production. */
 export const previewDemoAccessEnabled = () => isDemoMode();
@@ -26,7 +27,19 @@ export async function findPreviewDemoObjective() {
     if (!audit || audit.paymentStatus !== 'paid' || audit.status !== 'completed') continue;
     const org = await db.organization.findUnique({ where: { id: objective.organizationId }, include: { founder: true } });
     if (!org) continue;
-    return { objective, audit, ownerUserId: org.founder.userId };
+    return { objective, audit, org, ownerUserId: org.founder.userId };
   }
   return null;
+}
+
+/**
+ * The demo objective belongs to a separate, clearly fictional demo BUSINESS — never to Hippoturtle.
+ * Names the owning organisation only if it has no real name yet ("My company", or wrongly the platform's name) and labels
+ * the objective/org as demo data. Updates in place: no new objective, audit, order or payment; founder text and facts untouched.
+ */
+export async function ensureDemoIdentity(found: { objective: { id: string; isDemo: boolean }; org: { id: string; name: string; isDemo: boolean } }) {
+  if (isGenericOrgName(found.org.name) || !found.org.isDemo) {
+    await db.organization.update({ where: { id: found.org.id }, data: { isDemo: true, ...(isGenericOrgName(found.org.name) ? { name: DEMO_COMPANY_NAME } : {}) } });
+  }
+  if (!found.objective.isDemo) await db.objective.update({ where: { id: found.objective.id }, data: { isDemo: true } });
 }

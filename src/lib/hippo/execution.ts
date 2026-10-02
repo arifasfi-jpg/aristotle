@@ -1,6 +1,7 @@
 // AI execution of a work item, and the honest-broker quote comparison.
 import type { Capability } from './capabilities';
 import type { BriefData } from './mogli';
+import { identityBlock } from './types';
 
 export const EXECUTE_SCHEMA = {
   type: 'object',
@@ -16,9 +17,10 @@ export const EXECUTE_SCHEMA = {
 
 export type ExecutionOutput = { summary: string; markdown: string; assumptions: string[]; founderInputsNeeded: string[]; professionalReviewRequired: boolean };
 
-export function executePrompt(input: { title: string; brief: BriefData; cap: Capability; mode: 'AI' | 'HYBRID'; memory: string; research: string }): string {
+export function executePrompt(input: { title: string; brief: BriefData; cap: Capability; mode: 'AI' | 'HYBRID'; memory: string; research: string; company?: string | null }): string {
   return `You are the ${input.cap.label} capability (${input.cap.internalName}) at Hippoturtle, executing a work item for a founder in India.
 Produce the COMPLETE deliverable now — not an outline, not advice about how to do it.
+${identityBlock(input.company ?? null)}
 
 WORK: ${input.title}
 OBJECTIVE: ${input.brief.objective}

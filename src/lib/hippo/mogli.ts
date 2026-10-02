@@ -1,7 +1,7 @@
 // Mogli · Chief of Staff. Turns the founder's chosen pathways into concrete work packages,
 // writes structured Work Briefs and routes each piece of work to a capability.
 import { enabledCapabilities, routeCapability, type Capability } from './capabilities';
-import type { Pathway, Understanding, WorkPlanItem } from './types';
+import { identityBlock, type Pathway, type Understanding, type WorkPlanItem } from './types';
 
 // ---------------------------------------------------------------- WORK GENERATION
 export const PLAN_SCHEMA = {
@@ -16,10 +16,11 @@ export const PLAN_SCHEMA = {
   required: ['headline', 'work'],
 };
 
-export function planPrompt(input: { objective: string; understanding: Understanding | null; pathways: Pathway[]; experiments: { test: string; passThreshold: string }[]; thirtyDayPlan: { week: string; objective: string }[]; memory: string }): string {
+export function planPrompt(input: { objective: string; understanding: Understanding | null; pathways: Pathway[]; experiments: { test: string; passThreshold: string }[]; thirtyDayPlan: { week: string; objective: string }[]; memory: string; company?: string | null }): string {
   const caps = enabledCapabilities().map((c) => `- ${c.id}: ${c.label} — ${c.description}${c.requiresProfessional ? ' (regulated: AI prepares, professional approves)' : ''}`).join('\n');
   return `You are Mogli, Chief of Staff at Hippoturtle. Convert the founder's chosen pathways into the work that must happen
 between today and the FIRST VALIDATION MILESTONE (roughly the next 30 days).
+${identityBlock(input.company ?? null)}
 
 OBJECTIVE: """${input.objective}"""
 Target: ${input.understanding?.target || 'Not stated'} | Today: ${input.understanding?.currentState || 'Not stated'}
@@ -85,9 +86,10 @@ export const BRIEF_SCHEMA = {
   required: ['objective', 'deliverable', 'inputs', 'constraints', 'successCriteria', 'expectedOutput', 'outOfScope', 'effort'],
 };
 
-export function briefPrompt(input: { work: { title: string; description: string; deliverable: string }; cap: Capability; objective: string; memory: string; timeCommitment: string | null }): string {
+export function briefPrompt(input: { work: { title: string; description: string; deliverable: string }; cap: Capability; objective: string; memory: string; timeCommitment: string | null; company?: string | null }): string {
   return `You are Mogli, Chief of Staff at Hippoturtle. Write a precise WORK BRIEF so that ANY executor (AI, freelancer, agency)
 must deliver exactly the same thing. Vague briefs let providers overcharge or under-deliver; be specific.
+${identityBlock(input.company ?? null)}
 
 WORK: ${input.work.title}
 Description: ${input.work.description}

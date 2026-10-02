@@ -5,7 +5,7 @@ import type { AuditReport } from '../audit';
 import type { ResearchRecord } from '../evidence';
 import { buildFounderFactsBlock, type FounderFact } from '../founder-facts';
 import { researchBrief } from '../research';
-import { NOT_ESTABLISHED, type Pathway, type PathwaysResult, type Understanding } from './types';
+import { identityBlock, NOT_ESTABLISHED, type Pathway, type PathwaysResult, type Understanding } from './types';
 
 export const PATHWAYS_SCHEMA = {
   type: 'object',
@@ -31,9 +31,10 @@ export const PATHWAYS_SCHEMA = {
   required: ['goal', 'ambitionNote', 'pathways', 'combination', 'founderChecklist'],
 };
 
-export function pathwaysPrompt(input: { objective: string; understanding: Understanding | null; facts: FounderFact[]; research: ResearchRecord | null; report: AuditReport }): string {
+export function pathwaysPrompt(input: { objective: string; understanding: Understanding | null; facts: FounderFact[]; research: ResearchRecord | null; report: AuditReport; company?: string | null }): string {
   const memo = input.report.decisionMemo;
   return `You are Aristotle, the strategy capability of Hippoturtle. The founder's objective is NOT up for negotiation.
+${identityBlock(input.company ?? null)}
 Your job: lay out the plausible pathways to achieve the FULL objective, and what each would require.
 
 FOUNDER OBJECTIVE (verbatim): """${input.objective}"""

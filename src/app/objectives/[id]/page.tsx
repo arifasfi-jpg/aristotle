@@ -7,7 +7,7 @@ import { getLockedFacts, getResearch } from '@/lib/audit-meta';
 import type { ResearchRecord } from '@/lib/evidence';
 import { HttpError, requireObjective } from '@/lib/hippo/context';
 import { refreshObjective } from '@/lib/hippo/service';
-import type { PathwaysResult, Understanding } from '@/lib/hippo/types';
+import { businessName, type PathwaysResult, type Understanding } from '@/lib/hippo/types';
 import { isDemoMode } from '@/lib/payments';
 import DecisionMemoView from '@/components/hippo/DecisionMemoView';
 import PathwaysPanel from '@/components/hippo/PathwaysPanel';
@@ -28,12 +28,15 @@ export default async function ObjectivePage({ params }: { params: Promise<{ id: 
   try { ctx = await requireObjective(id); } catch (e) { if (e instanceof HttpError && e.status === 401) redirect('/start'); return notFound(); }
   const objective = await refreshObjective(ctx.objective);
   const u = objective.understanding as Understanding | null;
+  const company = businessName(ctx.org.name);
   const audit = objective.auditId ? await db.audit.findUnique({ where: { id: objective.auditId } }) : null;
   const memo = await db.decisionMemo.findUnique({ where: { objectiveId: objective.id } });
 
   const header = <div className="mb-8">
-    <div className="flex flex-wrap items-center gap-2"><Eyebrow>Objective</Eyebrow>{objective.isDemo && <Badge tone="amber">DEMO DATA</Badge>}<span className="text-xs text-[#6B7389]">Started {day(objective.createdAt)}</span></div>
-    <h1 className="mt-2 max-w-4xl text-2xl font-extrabold leading-tight tracking-tight sm:text-3xl">{u?.objective || objective.text}</h1>
+    <div className="flex flex-wrap items-center gap-2"><Eyebrow>Company</Eyebrow>{objective.isDemo && <Badge tone="amber">DEMO DATA — fictional business</Badge>}<span className="text-xs text-[#6B7389]">Started {day(objective.createdAt)}</span></div>
+    <h1 className="mt-1 text-2xl font-extrabold leading-tight tracking-tight sm:text-3xl">{company || 'Your business (not named yet)'}</h1>
+    <div className="mt-4 max-w-4xl rounded-2xl border border-[#E9E2D4] bg-white p-4"><div className="text-[11px] font-bold uppercase tracking-[.16em] text-[#6B7389]">Founder objective · founder stated</div><p className="mt-1 text-[15px] font-semibold leading-7">“{objective.text}”</p></div>
+    <p className="mt-2 text-xs text-[#6B7389]">Hippoturtle is the organisation working on this objective for {company || 'your business'}.</p>
     <div className="mt-5"><Stepper stage={objective.stage} /></div>
   </div>;
 

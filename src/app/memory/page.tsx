@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { ExternalLink } from 'lucide-react';
 import { db } from '@/lib/db';
 import { getFounderContext } from '@/lib/hippo/context';
-import { TRUTH_LABEL, type TruthStatus } from '@/lib/hippo/types';
+import { businessName, TRUTH_LABEL, type TruthStatus } from '@/lib/hippo/types';
 import { Badge, Card, Eyebrow, Shell, TruthBadge, day, when } from '@/components/hippo/ui';
 
 export const dynamic = 'force-dynamic';
@@ -23,7 +23,7 @@ export default async function Memory() {
   for (const h of history) { const k = new Date(h.occurredAt).toLocaleDateString('en-IN', { month: 'long', year: 'numeric' }); byMonth.set(k, [...(byMonth.get(k) || []), h]); }
 
   return <Shell active="memory">
-    <Eyebrow>Business memory</Eyebrow>
+    <Eyebrow>Business memory · {businessName(ctx.org.name) || 'your business'}</Eyebrow>
     <h1 className="mt-1 text-3xl font-extrabold tracking-tight">What happened — and what we know.</h1>
     <p className="mt-2 max-w-3xl leading-7 text-[#5B6478]">Not chat history: a structured record of your objectives, facts, decisions, work, costs, quotes and outcomes. Every entry says how true it is. AI guesses never become facts silently.</p>
 

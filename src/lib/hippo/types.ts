@@ -104,7 +104,7 @@ export const DEFAULT_ORG_NAME = 'My company';
 export const DEMO_COMPANY_NAME = 'Demo Glucose Technologies';
 
 /** A name that does not identify the founder's business (never set, or mistakenly the platform's own name). */
-export const isGenericOrgName = (name: string | null | undefined) => !name || !name.trim() || name.trim() === DEFAULT_ORG_NAME || /hippo\s*turtle/i.test(name);
+export const isGenericOrgName = (name: string | null | undefined) => !name || !name.trim() || name.trim().replace(/\s+/g, ' ').toLowerCase() === DEFAULT_ORG_NAME.toLowerCase() || /hippo\s*turtle/i.test(name);
 
 /** The founder's business name, or null when the founder has not named it. Never returns "Hippoturtle". */
 export const businessName = (name: string | null | undefined): string | null => (isGenericOrgName(name) ? null : name!.trim());

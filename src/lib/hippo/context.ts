@@ -36,17 +36,17 @@ export async function getFounderContext(opts: { create?: boolean; name?: string 
     if (!opts.create) return { user, founder: null, org: null };
     founder = await db.founder.create({ data: { userId: user.id, name: opts.name || user.name || null } });
   }
-  // Prefer the live (non-demo) org when one exists.
-  // Fallback to any org (including demo) only for pure demo-only sessions where no live org exists yet.
-  // This enforces the invariant: non-demo objective creation is always routed to the live org,
-  // even when a demo org (with an earlier createdAt) exists.
-  let org = await db.organization.findFirst({
-    where: { founderId: founder.id, isDemo: false },
-    orderBy: { createdAt: 'asc' },
-  });
-  if (!org) {
-    org = await db.organization.findFirst({ where: { founderId: founder.id }, orderBy: { createdAt: 'asc' } });
-  }
+  // Which of the founder's organisations the dashboard (/company, /memory) shows:
+  //  1. the live (non-demo) organisation once it holds a real objective — a demo org never shadows real work;
+  //  2. otherwise the most recent organisation that holds an objective (a founder who has only tried the demo
+  //     sees the demo, labelled as demo data, instead of an empty live org);
+  //  3. otherwise the live organisation, then any organisation.
+  // Creating a REAL objective never relies on this: createObjective() itself resolves (or creates) the live org.
+  const mine = { founderId: founder.id };
+  let org = await db.organization.findFirst({ where: { ...mine, isDemo: false, objectives: { some: {} } }, orderBy: { createdAt: 'asc' } })
+    ?? await db.organization.findFirst({ where: { ...mine, objectives: { some: {} } }, orderBy: { createdAt: 'desc' } })
+    ?? await db.organization.findFirst({ where: { ...mine, isDemo: false }, orderBy: { createdAt: 'asc' } })
+    ?? await db.organization.findFirst({ where: mine, orderBy: { createdAt: 'asc' } });
   if (!org && opts.create) org = await db.organization.create({ data: { founderId: founder.id, name: 'My company' } });
   return { user, founder, org };
 }

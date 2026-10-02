@@ -1,446 +1,164 @@
 /**
- * Preservation Property Tests — Task 2
- *
- * These tests encode the BASELINE behaviour that must be preserved after the fix.
- * They are written BEFORE the fix and MUST PASS on UNFIXED code.
- * They MUST CONTINUE TO PASS on FIXED code (regression guard).
- *
- * Properties 2a–2j as documented in tasks.md.
- *
- * Validates: Requirements 3.1, 3.2, 3.4, 3.8
+ * Preservation tests — behaviour that must NOT change with the isolation fix (Requirements 3.1, 3.2, 3.4, 3.8).
+ * Every test calls the production implementation; only the database, session and AI/Aristotle layer are mocked.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-// ---------------------------------------------------------------- DB mock
-const mockDb = {
-  organization: {
-    findFirst: vi.fn(),
-    findUnique: vi.fn(),
-    create: vi.fn(),
-    update: vi.fn(),
-  },
-  objective: {
-    findFirst: vi.fn(),
-    findUnique: vi.fn(),
-    findUniqueOrThrow: vi.fn(),
-    create: vi.fn(),
-    update: vi.fn(),
-    count: vi.fn(),
-    updateMany: vi.fn(),
-  },
-  founder: {
-    findUnique: vi.fn(),
-    create: vi.fn(),
-    update: vi.fn(),
-  },
-  user: {
-    create: vi.fn(),
-  },
-  businessMemory: {
-    findMany: vi.fn(),
-    findFirst: vi.fn(),
-    create: vi.fn(),
-    createMany: vi.fn(),
-    findUnique: vi.fn(),
-  },
-  activityLog: {
-    create: vi.fn(),
-  },
-  work: {
-    findFirst: vi.fn(),
-    updateMany: vi.fn(),
-  },
-};
-
+const mockDb = vi.hoisted(() => {
+  const fn = () => vi.fn();
+  return {
+    organization: { findFirst: fn(), findUnique: fn(), create: fn(), update: fn() },
+    objective: { findFirst: fn(), findUnique: fn(), findUniqueOrThrow: fn(), create: fn(), update: fn(), count: fn() },
+    founder: { findUnique: fn(), create: fn(), update: fn() },
+    user: { create: fn() },
+    businessMemory: { findMany: fn(), findFirst: fn(), findUnique: fn(), findFirstOrThrow: fn(), create: fn(), createMany: fn() },
+    activityLog: { create: fn() },
+  };
+});
 vi.mock('../../db', () => ({ db: mockDb }));
-
-vi.mock('../../session', () => ({
-  getCurrentUser: vi.fn(),
-  createSession: vi.fn(),
+vi.mock('../../session', () => ({ getCurrentUser: vi.fn(), createSession: vi.fn() }));
+vi.mock('../aristotle', () => ({
+  understandObjective: vi.fn(async () => ({ understanding: { keyQuestion: 'q' } })),
+  ensureAudit: vi.fn(async () => ({ id: 'audit_1' })),
+  parseReport: vi.fn(), syncAristotle: vi.fn(),
 }));
 
 import { getCurrentUser } from '../../session';
-import { getFounderContext, memoryBrief } from '../context';
-import { HttpError, requireObjective } from '../context';
-import { businessName, isGenericOrgName, DEMO_COMPANY_NAME, DEFAULT_ORG_NAME } from '../types';
+import { getFounderContext, memoryBrief, requireObjective } from '../context';
+import { companyFor, createObjective, resolveCompanyName } from '../service';
+import { businessName, DEFAULT_ORG_NAME, DEMO_COMPANY_NAME, isGenericOrgName } from '../types';
+
+type Org = { id: string; founderId: string; name: string; isDemo: boolean };
+function store(orgs: Org[]) {
+  const objectives: { id: string; organizationId: string; isDemo: boolean; companyName: string | null }[] = [];
+  let n = 0;
+  mockDb.organization.findUnique.mockImplementation(async ({ where }: { where: { id: string } }) => orgs.find((o) => o.id === where.id) ?? null);
+  // Array order = creation order. Supports the filters getFounderContext/createObjective use.
+  mockDb.organization.findFirst.mockImplementation(async ({ where, orderBy }: { where: { founderId: string; isDemo?: boolean; objectives?: object }; orderBy?: { createdAt: 'asc' | 'desc' } }) => {
+    const list = orgs.filter((o) => o.founderId === where.founderId && (where.isDemo === undefined || o.isDemo === where.isDemo) && (!where.objectives || objectives.some((x) => x.organizationId === o.id)));
+    return (orderBy?.createdAt === 'desc' ? list.reverse() : list)[0] ?? null;
+  });
+  mockDb.organization.create.mockImplementation(async ({ data }: { data: Omit<Org, 'id'> & { isDemo?: boolean } }) => { const o: Org = { id: `org_new_${++n}`, ...data, isDemo: data.isDemo ?? false }; orgs.push(o); return o; });
+  mockDb.organization.update.mockImplementation(async ({ where, data }: { where: { id: string }; data: Partial<Org> }) => Object.assign(orgs.find((o) => o.id === where.id)!, data));
+  mockDb.objective.count.mockImplementation(async ({ where }: { where: { organizationId: string } }) => objectives.filter((o) => o.organizationId === where.organizationId).length);
+  mockDb.objective.create.mockImplementation(async ({ data }: { data: { organizationId: string; isDemo: boolean; companyName: string | null } }) => { const o = { id: `obj_${++n}`, ...data }; objectives.push(o); return o; });
+  mockDb.objective.update.mockImplementation(async ({ where }: { where: { id: string } }) => objectives.find((o) => o.id === where.id));
+  mockDb.businessMemory.findFirst.mockResolvedValue({ id: 'bm' });
+  return { orgs, objectives };
+}
+const create = (org: Org, input: { companyName?: string | null; isDemo?: boolean }) => createObjective({ user: { id: 'u1' }, founder: { id: 'f1', name: null }, org }, { text: 'An objective long enough to be accepted.', mode: 'IDEA', ...input });
+const row = (id: string, status: string, title: string) => ({ id, organizationId: 'org1', objectiveId: 'obj1', kind: 'FACT', title, detail: '', value: null, status, source: null, sourceUrl: null, owner: 'sys', confidence: null, refType: null, refId: null, occurredAt: new Date(), createdAt: new Date() });
 
 beforeEach(() => {
   vi.clearAllMocks();
+  for (const model of Object.values(mockDb)) for (const f of Object.values(model)) f.mockReset(); // no implementation leaks between tests
 });
 
-// ================================================================
-// Property 2a — First-objective org naming preserved
-// ================================================================
-describe('Property 2a — First-objective org naming: org.name is updated on first objective creation', () => {
-  it('businessName() returns the non-generic company name unchanged', () => {
-    // The org-naming logic in createObjective() uses businessName()
-    // This property verifies the naming rule is unchanged for first-objective (existingCount=0).
+describe('Property 2a — first-objective org naming', () => {
+  it('generic-name helpers behave as before (and "My company" in any case/spacing is generic)', () => {
     expect(businessName('Aaira Books')).toBe('Aaira Books');
-    expect(businessName('My company')).toBeNull();
-    expect(businessName(DEFAULT_ORG_NAME)).toBeNull();
-    expect(businessName('')).toBeNull();
-    expect(businessName(null)).toBeNull();
-    expect(businessName(undefined)).toBeNull();
-    expect(businessName('GlucoCare India')).toBe('GlucoCare India');
+    expect(isGenericOrgName(DEMO_COMPANY_NAME)).toBe(false);
+    for (const n of [DEFAULT_ORG_NAME, 'my company', ' My   Company ', '', null, 'Hippoturtle']) expect(isGenericOrgName(n)).toBe(true);
   });
-
-  it('isGenericOrgName correctly identifies names that should not be used as company identities', () => {
-    expect(isGenericOrgName('My company')).toBe(true);
-    expect(isGenericOrgName('My Company')).toBe(true);
-    expect(isGenericOrgName('')).toBe(true);
-    expect(isGenericOrgName(null)).toBe(true);
-    expect(isGenericOrgName(undefined)).toBe(true);
-    expect(isGenericOrgName('HippoTurtle Labs')).toBe(true);
-    expect(isGenericOrgName('Aaira Books')).toBe(false);
-    expect(isGenericOrgName('Demo Glucose Technologies')).toBe(false); // DEMO_COMPANY_NAME is not generic
+  it('the first objective names the org; later objectives never rename it', async () => {
+    const live: Org = { id: 'org1', founderId: 'f1', name: DEFAULT_ORG_NAME, isDemo: false };
+    const s = store([live]);
+    await create(live, { companyName: 'Aaira Books' });
+    await create(live, { companyName: 'Other Venture' });
+    expect(live.name).toBe('Aaira Books');
+    expect(s.objectives.map((o) => o.companyName)).toEqual(['Aaira Books', 'Other Venture']);
   });
-
-  it('first-objective org naming: db.organization.update is called with the company name when existingCount=0', async () => {
-    /**
-     * This test documents that the original org-naming behaviour is preserved for the first objective.
-     * Fixed code: when existingCount = 0 AND businessName(input.companyName) is non-null,
-     * org.name is updated — exactly as before.
-     */
-    const orgBefore = { id: 'org1', name: DEFAULT_ORG_NAME, isDemo: false, founderId: 'f1' };
-    const orgAfter = { id: 'org1', name: 'Aaira Books', isDemo: false, founderId: 'f1' };
-
-    mockDb.organization.update.mockResolvedValue(orgAfter);
-    mockDb.objective.count.mockResolvedValue(0); // first objective
-
-    // Simulate the fixed createObjective logic for the first objective
-    const input = { companyName: 'Aaira Books', isDemo: false };
-    const existingCount = await mockDb.objective.count({ where: { organizationId: orgBefore.id } });
-    const wanted = businessName(input.companyName);
-
-    // For existingCount = 0 AND wanted is non-null: update should be called
-    if (existingCount === 0 && wanted) {
-      await mockDb.organization.update({ where: { id: orgBefore.id }, data: { name: wanted } });
-    }
-
-    expect(mockDb.organization.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ name: 'Aaira Books' }) })
-    );
-  });
-
-  it('first-objective with null companyName does NOT update org.name', async () => {
-    mockDb.objective.count.mockResolvedValue(0);
-
-    const input = { companyName: null, isDemo: false };
-    const existingCount = await mockDb.objective.count({ where: { organizationId: 'org1' } });
-    const wanted = businessName(input.companyName);
-
-    if (existingCount === 0 && wanted) {
-      await mockDb.organization.update({ where: { id: 'org1' }, data: { name: wanted } });
-    }
-
-    // null companyName → businessName returns null → no update
+  it('a first objective with no company name leaves the org unnamed', async () => {
+    const live: Org = { id: 'org1', founderId: 'f1', name: DEFAULT_ORG_NAME, isDemo: false };
+    const s = store([live]);
+    await create(live, { companyName: null });
     expect(mockDb.organization.update).not.toHaveBeenCalled();
+    expect(s.objectives[0].companyName).toBeNull();
   });
 });
 
-// ================================================================
-// Property 2b — Cross-founder requireObjective 404 isolation
-// ================================================================
-describe('Property 2b — Cross-founder 404: requireObjective throws HttpError(404) for wrong founder', () => {
-  it('requireObjective returns 404 when the objective belongs to a different founder', async () => {
-    const mockUser = { id: 'user_alice', name: 'Alice' };
-    const mockFounder = { id: 'f_alice', userId: 'user_alice', name: 'Alice' };
-    const aliceOrg = { id: 'org_alice', founderId: 'f_alice', isDemo: false };
-
-    (getCurrentUser as ReturnType<typeof vi.fn>).mockResolvedValue(mockUser);
-    mockDb.founder.findUnique.mockResolvedValue(mockFounder);
-    mockDb.organization.findFirst.mockResolvedValue(aliceOrg);
-
-    // objective belongs to a different founder (Bob), not Alice — findFirst returns null
+describe('Property 2b — cross-founder 404', () => {
+  beforeEach(() => {
+    vi.mocked(getCurrentUser).mockResolvedValue({ id: 'user_alice', name: 'Alice' } as never);
+    mockDb.founder.findUnique.mockResolvedValue({ id: 'f_alice', userId: 'user_alice', name: 'Alice' });
+    mockDb.organization.findFirst.mockResolvedValue({ id: 'org_alice', founderId: 'f_alice', isDemo: false });
+  });
+  it('requireObjective scopes the lookup to the founder and 404s otherwise', async () => {
     mockDb.objective.findFirst.mockResolvedValue(null);
-
-    await expect(requireObjective('obj_bob_secret')).rejects.toMatchObject({
-      status: 404,
-      message: expect.stringContaining('not found'),
-    });
+    await expect(requireObjective('obj_bob_secret')).rejects.toMatchObject({ status: 404 });
+    expect(mockDb.objective.findFirst).toHaveBeenCalledWith({ where: { id: 'obj_bob_secret', organization: { founderId: 'f_alice' } } });
   });
-
   it('requireObjective succeeds for the correct founder', async () => {
-    const mockUser = { id: 'user_alice', name: 'Alice' };
-    const mockFounder = { id: 'f_alice', userId: 'user_alice', name: 'Alice' };
-    const aliceOrg = { id: 'org_alice', founderId: 'f_alice', isDemo: false };
-    const aliceObjective = { id: 'obj_alice', organizationId: 'org_alice', isDemo: false, companyName: 'Aaira Books' };
-
-    (getCurrentUser as ReturnType<typeof vi.fn>).mockResolvedValue(mockUser);
-    mockDb.founder.findUnique.mockResolvedValue(mockFounder);
-    mockDb.organization.findFirst.mockResolvedValue(aliceOrg);
-    mockDb.objective.findFirst.mockResolvedValue(aliceObjective);
-
-    const result = await requireObjective('obj_alice');
-    expect(result.objective.id).toBe('obj_alice');
+    mockDb.objective.findFirst.mockResolvedValue({ id: 'obj_alice', organizationId: 'org_alice', companyName: 'Aaira Books' });
+    expect((await requireObjective('obj_alice')).objective.id).toBe('obj_alice');
   });
 });
 
-// ================================================================
-// Property 2c — memoryBrief no-op when no null rows
-// ================================================================
-describe('Property 2c — memoryBrief: identical output when no null-objectiveId rows exist', () => {
-  it('memoryBrief output is unchanged when all rows have non-null objectiveId', async () => {
-    /**
-     * When no null-objectiveId rows exist, removing the OR clause is a no-op:
-     * the old query: WHERE { organizationId, OR: [{ objectiveId }, { objectiveId: null }] }
-     * the new query: WHERE { organizationId, objectiveId }
-     * Both return the same rows — the output must be identical.
-     */
-    const rows = [
-      {
-        id: 'bm1', organizationId: 'org1', objectiveId: 'obj1',
-        kind: 'OBJECTIVE', title: 'Sell children books', detail: '', value: null,
-        status: 'FOUNDER_STATED', source: null, sourceUrl: null,
-        owner: 'Founder', confidence: null, refType: null, refId: null,
-        occurredAt: new Date('2026-01-01'), createdAt: new Date(),
-      },
-      {
-        id: 'bm2', organizationId: 'org1', objectiveId: 'obj1',
-        kind: 'FACT', title: 'Monthly sales', detail: '300 books/month', value: '300',
-        status: 'VERIFIED_FACT', source: 'Market survey', sourceUrl: null,
-        owner: 'Aristotle', confidence: 'HIGH', refType: null, refId: null,
-        occurredAt: new Date('2026-01-02'), createdAt: new Date(),
-      },
-    ];
-
-    // All rows have objectiveId = 'obj1' (non-null) → removing null arm is a no-op
-    mockDb.businessMemory.findMany.mockResolvedValue(rows);
-
-    const result = await memoryBrief('org1', 'obj1');
-    expect(result).toContain('Sell children books');
-    expect(result).toContain('Monthly sales');
-    expect(result).not.toBe('No business memory yet.');
+describe('Property 2c/2d — memoryBrief output and provenance grouping unchanged', () => {
+  it('rows are rendered and grouped into the 5 provenance tiers', async () => {
+    mockDb.businessMemory.findMany.mockResolvedValue([row('1', 'FOUNDER_STATED', 'Founder said X'), row('2', 'VERIFIED_FACT', 'Research says Y'), row('3', 'ASSUMPTION', 'AI assumed Z'), row('4', 'UNKNOWN', 'Not yet known'), row('5', 'RECORD', 'Decision recorded')]);
+    const out = await memoryBrief('org1', 'obj1');
+    for (const h of ['FOUNDER-STATED OR FOUNDER-APPROVED', 'SOURCED RESEARCH', 'AI PROPOSALS, HYPOTHESES, ASSUMPTIONS AND INFERENCES', 'NOT YET ESTABLISHED', 'RECORDS OF DECISIONS AND WORK']) expect(out).toContain(h);
+    for (const t of ['Founder said X', 'Research says Y', 'AI assumed Z']) expect(out).toContain(t);
   });
-});
-
-// ================================================================
-// Property 2d — Provenance tier grouping intact
-// ================================================================
-describe('Property 2d — Provenance tier grouping: all 5 headers present when rows exist', () => {
-  it('memoryBrief groups rows into the 5 provenance tiers', async () => {
-    const makeRow = (id: string, status: string, title: string) => ({
-      id, organizationId: 'org1', objectiveId: 'obj1',
-      kind: 'FACT', title, detail: '', value: null,
-      status, source: null, sourceUrl: null,
-      owner: 'sys', confidence: null, refType: null, refId: null,
-      occurredAt: new Date(), createdAt: new Date(),
-    });
-
-    const rows = [
-      makeRow('bm1', 'FOUNDER_STATED', 'Founder said X'),
-      makeRow('bm2', 'VERIFIED_FACT', 'Research says Y'),
-      makeRow('bm3', 'ASSUMPTION', 'AI assumed Z'),
-      makeRow('bm4', 'UNKNOWN', 'Not yet known'),
-      makeRow('bm5', 'RECORD', 'Decision recorded'),
-    ];
-
-    mockDb.businessMemory.findMany.mockResolvedValue(rows);
-
-    const result = await memoryBrief('org1', 'obj1');
-
-    expect(result).toContain('FOUNDER-STATED OR FOUNDER-APPROVED');
-    expect(result).toContain('SOURCED RESEARCH');
-    expect(result).toContain('AI PROPOSALS, HYPOTHESES, ASSUMPTIONS AND INFERENCES');
-    expect(result).toContain('NOT YET ESTABLISHED');
-    expect(result).toContain('RECORDS OF DECISIONS AND WORK');
-  });
-
-  it('memoryBrief returns "No business memory yet." when no rows exist', async () => {
+  it('limit is preserved and empty memory reads "No business memory yet."', async () => {
     mockDb.businessMemory.findMany.mockResolvedValue([]);
-    const result = await memoryBrief('org1', 'obj1');
-    expect(result).toBe('No business memory yet.');
+    expect(await memoryBrief('org1', 'obj1', 60)).toBe('No business memory yet.');
+    expect(mockDb.businessMemory.findMany.mock.calls[0][0]).toMatchObject({ take: 60, orderBy: { occurredAt: 'desc' } });
   });
 });
 
-// ================================================================
-// Property 2e — Multiple real objectives all on same live org
-// ================================================================
-describe('Property 2e — Multiple real objectives share the same live org', () => {
-  it('N>=2 non-demo objectives created under same founder share the same organizationId', () => {
-    /**
-     * For non-demo objectives: they are all attached to the single live org for the founder.
-     * The fix ensures:
-     * - getFounderContext() always returns the live org for non-demo creation
-     * - createObjective() non-demo path does NOT create a new org (only demo does)
-     * - All non-demo objectives share ctx.org.id (the live org)
-     */
-    const liveOrg = { id: 'org_live', isDemo: false };
-
-    // Simulate two non-demo objectives — both must share the same organizationId
-    const obj1 = { id: 'obj_1', organizationId: liveOrg.id, isDemo: false };
-    const obj2 = { id: 'obj_2', organizationId: liveOrg.id, isDemo: false };
-    const obj3 = { id: 'obj_3', organizationId: liveOrg.id, isDemo: false };
-
-    expect(obj1.organizationId).toBe(obj2.organizationId);
-    expect(obj2.organizationId).toBe(obj3.organizationId);
-    expect(obj1.isDemo).toBe(false);
-    expect(obj2.isDemo).toBe(false);
-    expect(obj3.isDemo).toBe(false);
-  });
-
-  it('getFounderContext() returns the same live org across multiple calls', async () => {
-    const mockUser = { id: 'user1', name: 'Alice' };
-    const mockFounder = { id: 'f1', userId: 'user1', name: 'Alice' };
-    const orgLive = { id: 'org_live', founderId: 'f1', isDemo: false, createdAt: new Date('2026-01-01') };
-
-    (getCurrentUser as ReturnType<typeof vi.fn>).mockResolvedValue(mockUser);
-    mockDb.founder.findUnique.mockResolvedValue(mockFounder);
-    // Fixed: returns live org for isDemo: false query
-    mockDb.organization.findFirst.mockImplementation((args: { where?: { isDemo?: boolean } }) => {
-      if (args?.where?.isDemo === false) return Promise.resolve(orgLive);
-      return Promise.resolve(orgLive); // also fallback
-    });
-
-    const ctx1 = await getFounderContext();
-    const ctx2 = await getFounderContext();
-
-    expect(ctx1!.org!.id).toBe(orgLive.id);
-    expect(ctx2!.org!.id).toBe(orgLive.id);
+describe('Property 2e/2f — real objectives share the live org; each demo gets its own org', () => {
+  it('two real objectives → same live org; two demos → two different demo orgs', async () => {
+    const live: Org = { id: 'org_live', founderId: 'f1', name: DEFAULT_ORG_NAME, isDemo: false };
+    const s = store([live]);
+    await create(live, { companyName: 'Aaira Books' });
+    await create(live, { isDemo: true });
+    await create(live, { companyName: null });
+    await create(live, { isDemo: true });
+    const [r1, d1, r2, d2] = s.objectives;
+    expect([r1.organizationId, r2.organizationId]).toEqual(['org_live', 'org_live']);
+    expect(d1.organizationId).not.toBe(d2.organizationId);
+    for (const d of [d1, d2]) expect(s.orgs.find((o) => o.id === d.organizationId)).toMatchObject({ isDemo: true, name: DEMO_COMPANY_NAME });
+    expect(r2.companyName).toBe('Aaira Books'); // second real objective of the same founder: the founder's own company
   });
 });
 
-// ================================================================
-// Property 2f — Multiple demo objectives each on separate orgs
-// ================================================================
-describe('Property 2f — Multiple demo objectives each on separate orgs', () => {
-  it('N>=2 demo objectives must have different organizationIds, all isDemo=true', () => {
-    /**
-     * The fix creates a fresh demo-flagged org for EACH demo objective.
-     * This means each demo run is fully isolated from every other.
-     */
-    const demoOrg1 = { id: 'org_demo1', isDemo: true };
-    const demoOrg2 = { id: 'org_demo2', isDemo: true };
-
-    const demoObj1 = { id: 'demo_obj1', organizationId: demoOrg1.id, isDemo: true };
-    const demoObj2 = { id: 'demo_obj2', organizationId: demoOrg2.id, isDemo: true };
-
-    // Each demo objective is on a different org
-    expect(demoObj1.organizationId).not.toBe(demoObj2.organizationId);
-    // Both demo orgs have isDemo = true
-    expect(demoOrg1.isDemo).toBe(true);
-    expect(demoOrg2.isDemo).toBe(true);
+describe('Property 2g — getFounderContext()', () => {
+  beforeEach(() => {
+    vi.mocked(getCurrentUser).mockResolvedValue({ id: 'u3', name: 'Carol' } as never);
+    mockDb.founder.findUnique.mockResolvedValue({ id: 'f3', userId: 'u3', name: 'Carol' });
+  });
+  it('returns the live org even when the demo org is older', async () => {
+    store([{ id: 'org_demo3', founderId: 'f3', name: DEMO_COMPANY_NAME, isDemo: true }, { id: 'org_live3', founderId: 'f3', name: 'x', isDemo: false }]);
+    expect((await getFounderContext())!.org!.id).toBe('org_live3');
+  });
+  it('a live org holding a real objective always wins over a demo org (older or newer)', async () => {
+    const s = store([{ id: 'org_demo_old', founderId: 'f3', name: DEMO_COMPANY_NAME, isDemo: true }, { id: 'org_live3', founderId: 'f3', name: 'Aaira Books', isDemo: false }, { id: 'org_demo_new', founderId: 'f3', name: DEMO_COMPANY_NAME, isDemo: true }]);
+    s.objectives.push({ id: 'd1', organizationId: 'org_demo_old', isDemo: true, companyName: DEMO_COMPANY_NAME }, { id: 'a1', organizationId: 'org_live3', isDemo: false, companyName: 'Aaira Books' }, { id: 'd2', organizationId: 'org_demo_new', isDemo: true, companyName: DEMO_COMPANY_NAME });
+    expect((await getFounderContext())!.org!.id).toBe('org_live3');
+  });
+  it('a founder who has only tried the demo sees the demo org, not an empty live org', async () => {
+    const s = store([{ id: 'org_live_empty', founderId: 'f3', name: DEFAULT_ORG_NAME, isDemo: false }, { id: 'org_demo', founderId: 'f3', name: DEMO_COMPANY_NAME, isDemo: true }]);
+    s.objectives.push({ id: 'd1', organizationId: 'org_demo', isDemo: true, companyName: DEMO_COMPANY_NAME });
+    expect((await getFounderContext())!.org!.id).toBe('org_demo');
+  });
+  it('falls back to the demo org for a demo-only founder (for display only; createObjective never uses it for real work)', async () => {
+    store([{ id: 'org_demo4', founderId: 'f3', name: DEMO_COMPANY_NAME, isDemo: true }]);
+    expect((await getFounderContext())!.org!.id).toBe('org_demo4');
   });
 });
 
-// ================================================================
-// Property 2g — getFounderContext() always returns non-demo org when one exists
-// ================================================================
-describe('Property 2g — getFounderContext() prefers live org regardless of createdAt ordering', () => {
-  it('returns non-demo org even when demo org was created first (earlier createdAt)', async () => {
-    const mockUser = { id: 'user3', name: 'Carol' };
-    const mockFounder = { id: 'f3', userId: 'user3', name: 'Carol' };
-    // Demo org created first (T1), live org created second (T2)
-    const orgDemo = { id: 'org_demo3', founderId: 'f3', isDemo: true, createdAt: new Date('2026-01-01T00:00:00Z') };
-    const orgLive = { id: 'org_live3', founderId: 'f3', isDemo: false, createdAt: new Date('2026-06-01T00:00:00Z') };
-
-    (getCurrentUser as ReturnType<typeof vi.fn>).mockResolvedValue(mockUser);
-    mockDb.founder.findUnique.mockResolvedValue(mockFounder);
-
-    // Fixed: first query filters isDemo: false → returns orgLive (even though it is newer)
-    mockDb.organization.findFirst.mockImplementation((args: { where?: { isDemo?: boolean } }) => {
-      if (args?.where?.isDemo === false) return Promise.resolve(orgLive);
-      // Fallback (unfixed behaviour / pure demo session): returns demo org (oldest)
-      return Promise.resolve(orgDemo);
-    });
-
-    const ctx = await getFounderContext();
-    expect(ctx!.org!.id).toBe(orgLive.id);
-    expect(ctx!.org!.isDemo).toBe(false);
+describe('Property 2h/2i/2j — company identity resolution', () => {
+  it('2h: a backfilled legacy objective returns its stored name', async () => {
+    expect(await companyFor({ companyName: 'Aaira Books', organizationId: 'org_single' })).toBe('Aaira Books');
   });
-
-  it('falls back to any org (including demo) when no live org exists — pure demo session', async () => {
-    const mockUser = { id: 'user4', name: 'Dave' };
-    const mockFounder = { id: 'f4', userId: 'user4', name: 'Dave' };
-    const orgDemo = { id: 'org_demo4', founderId: 'f4', isDemo: true, createdAt: new Date('2026-01-01') };
-
-    (getCurrentUser as ReturnType<typeof vi.fn>).mockResolvedValue(mockUser);
-    mockDb.founder.findUnique.mockResolvedValue(mockFounder);
-
-    // No live org exists: isDemo: false query returns null; fallback returns demo org
-    mockDb.organization.findFirst.mockImplementation((args: { where?: { isDemo?: boolean } }) => {
-      if (args?.where?.isDemo === false) return Promise.resolve(null); // no live org
-      return Promise.resolve(orgDemo); // fallback
-    });
-
-    const ctx = await getFounderContext();
-    // In pure demo session, fallback to demo org is acceptable
-    expect(ctx!.org).not.toBeNull();
-    expect(ctx!.org!.id).toBe(orgDemo.id);
+  it('2i: ambiguous multi-objective legacy org → null (never a possibly wrong name)', () => {
+    expect(resolveCompanyName({ companyName: null }, { name: 'Aaira Books' }, 2)).toBeNull();
   });
-});
-
-// ================================================================
-// Property 2h — Legacy Category A: companyFor uses backfilled name
-// ================================================================
-describe('Property 2h — Legacy Category A: single-objective org backfill preserved', () => {
-  it('after migration, Category A objective has companyName = org.name and companyFor returns it', async () => {
-    /**
-     * After the migration backfill (task 3.2):
-     *   - Legacy objectives whose org has exactly 1 objective and a non-generic org name
-     *     have companyName set from org.name.
-     * companyFor() takes the fast path (companyName != null) and returns businessName(companyName).
-     * This is identical to the original org-name lookup.
-     */
-    // Post-migration: companyName is set from org.name
-    const backfilledObjective = { id: 'obj_legacy', organizationId: 'org_single', companyName: 'Aaira Books' };
-    const result = backfilledObjective.companyName != null ? businessName(backfilledObjective.companyName) : null;
-    expect(result).toBe('Aaira Books');
-  });
-});
-
-// ================================================================
-// Property 2i — Legacy Category B: multi-objective org returns null
-// ================================================================
-describe('Property 2i — Legacy Category B: companyFor returns null for ambiguous multi-objective org', () => {
-  it('returning null is strictly safer than returning a potentially wrong org name', () => {
-    /**
-     * For Category B (count >= 2, companyName = null):
-     * - Original code: returned org.name (could be the wrong company name due to the bug)
-     * - Fixed code: returns null
-     * Returning null triggers identityBlock(null) which uses a neutral prompt.
-     * This is NOT a regression — it is a deliberate conservative improvement.
-     */
-    const { identityBlock } = require('../types');
-    const neutral = identityBlock(null);
-    const withWrongName = identityBlock('Demo Glucose Technologies');
-
-    // Neutral prompt does not contain any specific company name
-    expect(neutral).not.toContain('Demo Glucose Technologies');
-    expect(neutral).not.toContain('Aaira Books');
-    // It uses a safe placeholder
-    expect(neutral).toContain("founder's business");
-
-    // The wrong-name prompt would inject incorrect identity into AI
-    expect(withWrongName).toContain('Demo Glucose Technologies');
-    // null is strictly safer
-    expect(neutral).not.toBe(withWrongName);
-  });
-});
-
-// ================================================================
-// Property 2j — New objectives after migration: take fast path
-// ================================================================
-describe('Property 2j — New objectives (post-migration) take the fast companyName path', () => {
-  it('objective with non-null companyName returns it without a DB lookup', async () => {
-    /**
-     * All objectives created after the fix have companyName set at creation.
-     * companyFor() takes the fast path: return businessName(objective.companyName) immediately.
-     * No DB call is needed for org or count.
-     */
-    // We don't call any mock here — if mockDb is called it means the fast path was NOT taken
-    const newObjective = { id: 'obj_new', organizationId: 'org_live', companyName: 'Aaira Books' };
-    const result = newObjective.companyName != null ? businessName(newObjective.companyName) : null;
-
-    expect(result).toBe('Aaira Books');
-    // No DB queries were made (fast path)
+  it('2j: stored names take the fast path (no DB lookup); the demo name is returned for demo objectives', async () => {
+    expect(await companyFor({ companyName: DEMO_COMPANY_NAME, organizationId: 'org_demo' })).toBe(DEMO_COMPANY_NAME);
     expect(mockDb.organization.findUnique).not.toHaveBeenCalled();
     expect(mockDb.objective.count).not.toHaveBeenCalled();
-  });
-
-  it('DEMO_COMPANY_NAME is stored as companyName on demo objectives → companyFor returns it', () => {
-    const demoObjective = { id: 'obj_demo', organizationId: 'org_demo', companyName: DEMO_COMPANY_NAME };
-    const result = demoObjective.companyName != null ? businessName(demoObjective.companyName) : null;
-    expect(result).toBe(DEMO_COMPANY_NAME);
   });
 });

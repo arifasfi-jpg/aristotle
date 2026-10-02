@@ -60,6 +60,34 @@ export function normaliseOutput(raw: unknown, cap: Capability, mode: 'AI' | 'HYB
   };
 }
 
+// ---------------------------------------------------------------- PROVENANCE OF AI DELIVERABLES
+/** Machine-readable marker carried by every AI-generated execution deliverable. */
+export const AI_PROVENANCE_MARKER = '<!-- HIPPOTURTLE_PROVENANCE: AI_GENERATED_DRAFT -->';
+
+/**
+ * Every Execution output is produced by AI (executeWork is the only writer), so it ALWAYS carries an explicit
+ * "AI-generated" header — unconditionally, even when the model reports no assumptions and no founder inputs.
+ * Applied when the output is stored AND whenever it is shown or downloaded, so outputs stored before this
+ * existed are labelled too. Idempotent: an output that already starts with the marker is returned unchanged.
+ * Model-written list items are flattened to one line so they cannot break out of the warning block.
+ */
+export function withAiProvenance(markdown: string, meta: { assumptions?: unknown; founderInputsNeeded?: unknown } = {}): string {
+  const body = markdown || '';
+  if (body.startsWith(AI_PROVENANCE_MARKER)) return body;
+  const items = (v: unknown, n: number) => (Array.isArray(v) ? v.map((x) => String(x).replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, n) : []);
+  const needed = items(meta.founderInputsNeeded, 15);
+  const assumed = items(meta.assumptions, 5);
+  return [
+    AI_PROVENANCE_MARKER,
+    '',
+    '> **⚠ AI-generated draft — review before use in marketing, legal, or financial communications.**',
+    ...(needed.length ? ['>', '> **Founder inputs needed:**', ...needed.map((x) => `> - ${x}`)] : []),
+    ...(assumed.length ? ['>', '> **AI assumptions (not founder-approved):**', ...assumed.map((x) => `> - ${x}`)] : []),
+    '',
+    body,
+  ].join('\n');
+}
+
 // ---------------------------------------------------------------- HONEST BROKER
 export type QuoteComparison = {
   benchmarkLow: number | null; benchmarkHigh: number | null; deltaPct: number | null;

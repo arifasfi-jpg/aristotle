@@ -34,12 +34,17 @@ export async function findPreviewDemoObjective() {
 
 /**
  * The demo objective belongs to a separate, clearly fictional demo BUSINESS — never to Hippoturtle.
- * Names the owning organisation only if it has no real name yet ("My company", or wrongly the platform's name) and labels
- * the objective/org as demo data. Updates in place: no new objective, audit, order or payment; founder text and facts untouched.
+ * The objective itself is labelled as demo data with the fictional company name. The owning organisation is
+ * flagged/renamed as the demo business ONLY when every objective in it is demo data: an organisation that also
+ * holds a real objective (legacy shared organisation) is left untouched, so the demo can never re-label a real
+ * business. Updates in place: no new objective, audit, order or payment; founder text and facts untouched.
  */
-export async function ensureDemoIdentity(found: { objective: { id: string; isDemo: boolean }; org: { id: string; name: string; isDemo: boolean } }) {
-  if (isGenericOrgName(found.org.name) || !found.org.isDemo) {
+export async function ensureDemoIdentity(found: { objective: { id: string; isDemo: boolean; companyName?: string | null }; org: { id: string; name: string; isDemo: boolean } }) {
+  const realObjectives = await db.objective.count({ where: { organizationId: found.org.id, isDemo: false, id: { not: found.objective.id } } });
+  if (realObjectives === 0 && (isGenericOrgName(found.org.name) || !found.org.isDemo)) {
     await db.organization.update({ where: { id: found.org.id }, data: { isDemo: true, ...(isGenericOrgName(found.org.name) ? { name: DEMO_COMPANY_NAME } : {}) } });
   }
-  if (!found.objective.isDemo) await db.objective.update({ where: { id: found.objective.id }, data: { isDemo: true } });
+  if (!found.objective.isDemo || found.objective.companyName == null) {
+    await db.objective.update({ where: { id: found.objective.id }, data: { isDemo: true, ...(found.objective.companyName == null ? { companyName: DEMO_COMPANY_NAME } : {}) } });
+  }
 }

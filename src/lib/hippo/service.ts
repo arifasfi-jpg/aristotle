@@ -9,41 +9,38 @@ import { researchBrief } from '../research';
 import { allowedModes, getCapability, routeCapability } from './capabilities';
 import { HttpError, isUniqueViolation, logActivity, memoryBrief, remember } from './context';
 import { computeEstimates, midpoint, normaliseEffort } from './costs';
-import { comparePrompt, COMPARE_SCHEMA, EXECUTE_SCHEMA, executePrompt, normaliseOutput, positionQuote, rulesExplanation, type QuoteComparison } from './execution';
+import { comparePrompt, COMPARE_SCHEMA, EXECUTE_SCHEMA, executePrompt, normaliseOutput, positionQuote, rulesExplanation, withAiProvenance, type QuoteComparison } from './execution';
 import { aiMeta, generateJson, type GatewayResult } from './gateway';
 import { BRIEF_SCHEMA, briefPrompt, normaliseBrief, normalisePlan, PLAN_SCHEMA, planPrompt, type BriefData } from './mogli';
 import { normalisePathways, PATHWAYS_SCHEMA, pathwaysPrompt } from './pathways';
 import { canExecuteNow, workPaymentPlan } from './payments';
 import { classifyInputs, itemKey, type BriefInput, type ProvenanceContext } from './provenance';
 import { ensureAudit, parseReport, syncAristotle, understandObjective } from './aristotle';
-import { advanceTo, businessName, DEMO_COMPANY_NAME, isExecutionMode, PROVIDER_TIERS, type EffortModel, type PathwaysResult, type Understanding } from './types';
+import { advanceTo, businessName, DEFAULT_ORG_NAME, DEMO_COMPANY_NAME, isExecutionMode, PROVIDER_TIERS, type EffortModel, type PathwaysResult, type Understanding } from './types';
 
 type Org = { id: string; isDemo?: boolean; name?: string };
 type Objective = { id: string; organizationId: string; companyName: string | null; text: string; stage: string; auditId: string | null; understanding: Prisma.JsonValue; selectedPathways: Prisma.JsonValue };
 const json = (v: unknown) => v as Prisma.InputJsonValue;
 
-/** The founder's business name for this objective's AI prompts (null when unnamed or ambiguous). Never the platform's own name. */
-async function companyFor(
-  objective: { companyName?: string | null; organizationId: string }
-): Promise<string | null> {
-  // Per-objective name is authoritative and immutable — always use it when set.
+/**
+ * The founder's business name for ONE objective (null when unnamed or ambiguous). Never the platform's own name.
+ * objective.companyName (set at creation, never changed) is authoritative. Legacy objectives (companyName NULL,
+ * created before it existed) may use the organisation's name only when that organisation has exactly one
+ * objective; with several, the org name may belong to (or have been overwritten by) another objective, so null.
+ */
+export function resolveCompanyName(objective: { companyName?: string | null }, org: { name?: string | null } | null, objectivesInOrg: number): string | null {
   if (objective.companyName != null) return businessName(objective.companyName);
+  return objectivesInOrg === 1 ? businessName(org?.name) : null;
+}
 
-  // Fallback path: only reached for legacy rows where companyName = NULL (created before this fix).
-  // Only safe when this org has exactly one objective (the org name unambiguously belongs to it).
-  // For multi-objective orgs, the org name is ambiguous — it may have been overwritten by the bug.
-  // Returning null is intentionally conservative: a wrong identity is worse than no identity.
-  const [org, objectiveCount] = await Promise.all([
+/** Objective-aware company identity for AI prompts and objective pages. */
+export async function companyFor(objective: { companyName?: string | null; organizationId: string }): Promise<string | null> {
+  if (objective.companyName != null) return resolveCompanyName(objective, null, 0); // fast path: no lookup
+  const [org, objectivesInOrg] = await Promise.all([
     db.organization.findUnique({ where: { id: objective.organizationId }, select: { name: true } }),
     db.objective.count({ where: { organizationId: objective.organizationId } }),
   ]);
-
-  if (objectiveCount > 1) {
-    // Multi-objective org: org name is ambiguous for this objective. Return null.
-    // identityBlock(null) produces a neutral prompt with no company identity assumption.
-    return null;
-  }
-  return businessName(org?.name);
+  return resolveCompanyName(objective, org, objectivesInOrg);
 }
 
 /** Everything an input value may legitimately trace to: the founder's words, confirmed facts, approvals, verified findings. */
@@ -64,14 +61,8 @@ async function logAi(orgId: string, objectiveId: string, workId: string | null, 
 export async function createObjective(ctx: { user: { id: string }; founder: { id: string; name: string | null }; org: Org & { name?: string; isDemo?: boolean } }, input: { text: string; mode: 'IDEA' | 'EXPLORE'; timeCommitment?: string | null; isDemo?: boolean; companyName?: string | null }) {
   if (input.timeCommitment) await db.founder.update({ where: { id: ctx.founder.id }, data: { timeCommitment: input.timeCommitment } });
 
-  // Resolve the per-objective company name:
-  // demo → always DEMO_COMPANY_NAME; non-demo → founder input or existing org name.
-  const companyNameForObjective =
-    input.isDemo
-      ? DEMO_COMPANY_NAME
-      : businessName(input.companyName) ?? businessName(ctx.org.name) ?? null;
-
   let orgId = ctx.org.id;
+  let liveOrgName: string | null = null;
   if (input.isDemo) {
     // Demo objectives always get a fresh isolated org — never touch the founder's live org.
     const demoOrg = await db.organization.create({
@@ -79,20 +70,32 @@ export async function createObjective(ctx: { user: { id: string }; founder: { id
     });
     orgId = demoOrg.id;
   } else {
-    // Belt-and-suspenders: getFounderContext() should always return a live org for non-demo
-    // creation, but assert here to catch any future bypass of that invariant.
-    if (ctx.org.isDemo) {
-      throw new Error('INVARIANT VIOLATION: attempted to attach a real objective to a demo org');
+    // A real objective must live in the founder's live (non-demo) organisation. Read isDemo from the database rather
+    // than trusting the caller. A founder whose only organisation is a demo one (legacy data, or a Preview demo
+    // account) gets a new live organisation instead of an error.
+    const pick = { id: true, isDemo: true, founderId: true, name: true } as const;
+    let live = await db.organization.findUnique({ where: { id: ctx.org.id }, select: pick });
+    if (!live || live.isDemo || live.founderId !== ctx.founder.id) {
+      live = (await db.organization.findFirst({ where: { founderId: ctx.founder.id, isDemo: false }, orderBy: { createdAt: 'asc' }, select: pick }))
+        ?? await db.organization.create({ data: { founderId: ctx.founder.id, name: DEFAULT_ORG_NAME }, select: pick });
     }
+    if (live.isDemo) throw new Error('INVARIANT VIOLATION: attempted to attach a real objective to a demo org');
+    orgId = live.id;
+    liveOrgName = live.name;
     // Only rename the org on the very first objective — after that the name is frozen on the org.
-    const existingCount = await db.objective.count({ where: { organizationId: ctx.org.id } });
+    const existingCount = await db.objective.count({ where: { organizationId: orgId } });
     if (existingCount === 0) {
       const wanted = businessName(input.companyName);
       if (wanted) {
-        await db.organization.update({ where: { id: ctx.org.id }, data: { name: wanted } });
+        await db.organization.update({ where: { id: orgId }, data: { name: wanted } });
       }
     }
   }
+
+  // Per-objective company name, fixed at creation: demo → the fictional demo name; real → the founder's input, else
+  // the founder's own live organisation's name. A real objective can never take the demo business's name.
+  const notDemoName = (n: string | null) => (n && n !== DEMO_COMPANY_NAME ? n : null);
+  const companyNameForObjective = input.isDemo ? DEMO_COMPANY_NAME : notDemoName(businessName(input.companyName)) ?? notDemoName(businessName(liveOrgName));
 
   // companyName is stored on the objective row — immutable after creation.
   const objective = await db.objective.create({
@@ -266,24 +269,9 @@ export async function executeWork(ctx: { work: { id: string; organizationId: str
     const research = objective.auditId ? (await getResearch(objective.auditId)) as ResearchRecord | null : null;
     const r = await generateJson<unknown>('execute', executePrompt({ title: work.title, brief, cap, mode, memory, research: research ? researchBrief(research).slice(0, 12_000) : 'none', company: await companyFor(objective) }), EXECUTE_SCHEMA);
     const out = normaliseOutput(r.data, cap, mode);
-    // Every AI-generated execution deliverable carries a machine-readable provenance marker.
-    // This is an output-level signal only — it does not replace the structured provenance system
-    // (FOUNDER_STATED / VERIFIED_FACT / ASSUMPTION / HYPOTHESIS / INFERENCE / UNKNOWN).
-    // The marker is UNCONDITIONAL: it must be present even when assumptions and founderInputsNeeded
-    // are empty (the model can embed invented statistics in prose without surfacing them as arrays).
-    const provenanceHeader = [
-      '<!-- HIPPOTURTLE_PROVENANCE: AI_GENERATED_DRAFT -->',
-      '',
-      '> **⚠ AI-generated draft — review before use in marketing, legal, or financial communications.**',
-      ...(out.founderInputsNeeded.length
-        ? ['>', '> **Founder inputs needed:**', ...out.founderInputsNeeded.map((x: string) => `> - ${x}`)]
-        : []),
-      ...(out.assumptions.length
-        ? ['>', '> **AI assumptions (not founder-approved):**', ...out.assumptions.slice(0, 5).map((x: string) => `> - ${x}`)]
-        : []),
-      '',
-    ].join('\n');
-    const taggedMarkdown = provenanceHeader + out.markdown;
+    // Every AI-generated deliverable carries an explicit, unconditional AI-generated marker (also re-applied on
+    // display/download, so it cannot be lost). It does not replace the structured truth statuses.
+    const taggedMarkdown = withAiProvenance(out.markdown, out);
     const waiting = mode === 'HYBRID' || cap.requiresProfessional;
     await db.execution.update({ where: { id: execution.id }, data: { status: waiting ? 'WAITING_FOR_REVIEW' : 'COMPLETED', provider: r.provider, model: r.model, output: taggedMarkdown, outputSummary: out.summary, inputTokens: r.inputTokens, outputTokens: r.outputTokens, costInr: r.costInr, input: json({ brief, capability: cap.id, assumptions: out.assumptions, founderInputsNeeded: out.founderInputsNeeded, professionalReviewRequired: out.professionalReviewRequired }), completedAt: new Date() } });
     await db.work.update({ where: { id: work.id }, data: { status: waiting ? 'WAITING_FOR_INPUT' : 'COMPLETED', completedAt: waiting ? null : new Date() } });
@@ -334,8 +322,9 @@ export async function recordOutcome(ctx: { org: Org; objective: Objective; work?
   const { objective, work } = ctx;
   const outcome = await db.outcome.create({ data: { objectiveId: objective.id, workId: work?.id ?? null, summary: input.summary, metrics: json(input.metrics), recordedBy: 'Founder' } });
   if (work && work.status !== 'COMPLETED') await db.work.update({ where: { id: work.id }, data: { status: 'COMPLETED', completedAt: new Date() } });
-  await remember({ organizationId: ctx.org.id, objectiveId: objective.id, kind: 'OUTCOME', title: work ? `Outcome of "${work.title}"` : 'Outcome recorded', detail: `${input.summary}${input.metrics.length ? `\n${input.metrics.map((m) => `${m.label}: ${m.value}`).join('\n')}` : ''}`, status: 'FOUNDER_STATED', owner: 'Founder', source: 'Founder', refType: 'outcome', refId: outcome.id });
-  await logActivity({ organizationId: ctx.org.id, objectiveId: objective.id, workId: work?.id, type: 'OUTCOME_RECORDED', actor: 'Founder', message: `Outcome recorded${work ? ` for "${work.title}"` : ''}: ${input.summary}`.slice(0, 400) });
+  // The outcome belongs to the objective's own organisation (a demo objective's org is not the founder's live org).
+  await remember({ organizationId: objective.organizationId, objectiveId: objective.id, kind: 'OUTCOME', title: work ? `Outcome of "${work.title}"` : 'Outcome recorded', detail: `${input.summary}${input.metrics.length ? `\n${input.metrics.map((m) => `${m.label}: ${m.value}`).join('\n')}` : ''}`, status: 'FOUNDER_STATED', owner: 'Founder', source: 'Founder', refType: 'outcome', refId: outcome.id });
+  await logActivity({ organizationId: objective.organizationId, objectiveId: objective.id, workId: work?.id, type: 'OUTCOME_RECORDED', actor: 'Founder', message: `Outcome recorded${work ? ` for "${work.title}"` : ''}: ${input.summary}`.slice(0, 400) });
   await db.objective.update({ where: { id: objective.id }, data: { stage: advanceTo(objective.stage, 'OUTCOME') } });
   return outcome;
 }

@@ -6,8 +6,8 @@ import type { AuditReport } from '@/lib/audit';
 import { getLockedFacts, getResearch } from '@/lib/audit-meta';
 import type { ResearchRecord } from '@/lib/evidence';
 import { HttpError, requireObjective } from '@/lib/hippo/context';
-import { refreshObjective } from '@/lib/hippo/service';
-import { businessName, type PathwaysResult, type Understanding } from '@/lib/hippo/types';
+import { companyFor, refreshObjective } from '@/lib/hippo/service';
+import type { PathwaysResult, Understanding } from '@/lib/hippo/types';
 import { isDemoMode } from '@/lib/payments';
 import DecisionMemoView from '@/components/hippo/DecisionMemoView';
 import PathwaysPanel from '@/components/hippo/PathwaysPanel';
@@ -28,7 +28,7 @@ export default async function ObjectivePage({ params }: { params: Promise<{ id: 
   try { ctx = await requireObjective(id); } catch (e) { if (e instanceof HttpError && e.status === 401) redirect('/start'); return notFound(); }
   const objective = await refreshObjective(ctx.objective);
   const u = objective.understanding as Understanding | null;
-  const company = businessName(ctx.org.name);
+  const company = await companyFor(objective); // this objective's business, never another objective's or the demo's
   const audit = objective.auditId ? await db.audit.findUnique({ where: { id: objective.auditId } }) : null;
   const memo = await db.decisionMemo.findUnique({ where: { objectiveId: objective.id } });
 

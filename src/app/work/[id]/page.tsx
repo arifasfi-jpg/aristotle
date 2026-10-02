@@ -5,7 +5,7 @@ import { db } from '@/lib/db';
 import { allowedModes, routeCapability } from '@/lib/hippo/capabilities';
 import { HttpError, requireWork } from '@/lib/hippo/context';
 import { LABELS } from '@/lib/hippo/costs';
-import type { QuoteComparison } from '@/lib/hippo/execution';
+import { withAiProvenance, type QuoteComparison } from '@/lib/hippo/execution';
 import { workPaymentPlan } from '@/lib/hippo/payments';
 import { classifyInputs, INPUT_LABEL, proposedLabel, type BriefInput } from '@/lib/hippo/provenance';
 import { provenanceFor } from '@/lib/hippo/service';
@@ -84,7 +84,7 @@ export default async function WorkPage({ params }: { params: Promise<{ id: strin
             {output.outputSummary && <p className="mt-3 rounded-xl bg-[#F4FAF6] p-3 text-sm leading-6">{output.outputSummary}</p>}
             {(cap.requiresProfessional || output.status === 'WAITING_FOR_REVIEW') && <div className="mt-3 flex gap-2 rounded-xl bg-[#FFF1DF] p-3 text-sm text-[#6B3A00]"><ShieldAlert size={17} className="mt-0.5 shrink-0"/>{cap.requiresProfessional ? `Prepared by AI. A qualified ${cap.costModel.specialist.toLowerCase()} must review and approve this before it is relied on. Hippoturtle is not a lawyer or CA.` : 'AI draft complete. A human reviewer has not been assigned yet — add a quote below or review it yourself, then record the outcome.'}</div>}
             {(() => { const meta = output.input as { founderInputsNeeded?: string[] }; return meta?.founderInputsNeeded?.length ? <div className="mt-3 text-sm"><div className="font-bold">Needed from you</div><List items={meta.founderInputsNeeded} /></div> : null; })()}
-            <div className="mt-5 max-h-[720px] overflow-y-auto rounded-2xl border border-[#E9E2D4] bg-white p-5"><Markdown>{output.output || ''}</Markdown></div>
+            <div className="mt-5 max-h-[720px] overflow-y-auto rounded-2xl border border-[#E9E2D4] bg-white p-5"><Markdown>{withAiProvenance(output.output || '', (output.input || {}) as { assumptions?: unknown; founderInputsNeeded?: unknown })}</Markdown></div>
           </>}
         </Card>}
         {latest?.status === 'FAILED' && !running && <Card><div className="font-bold text-[#A3271B]">The last attempt failed and nothing was charged.</div><p className="text-sm text-[#5B6478]">You can retry below.</p></Card>}

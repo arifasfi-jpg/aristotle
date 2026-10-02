@@ -138,25 +138,53 @@ function fixUnit(row: UnitEconomicsRow, log: ValidationLog): UnitEconomicsRow {
 const GENERIC_WORDS = new Set(['target', 'current', 'founder', 'stated', 'proposed', 'conditional', 'volume', 'number', 'figure', 'other', 'per', 'month', 'monthly', 'week', 'year', 'day', 'total', 'the', 'and', 'of', 'a', 'an', 'to', 'in', 'for', 'sales', 'sold', 'sell', 'goal', 'units', 'unit']);
 const wordsOf = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(/\s+/).filter((w) => w.length > 1 && !GENERIC_WORDS.has(w)).map((w) => w.replace(/s$/, ''));
 const AGE_CONCEPTS = ['founder_age', 'audience_age'];
+/**
+ * Founder facts that are unit-economics quantities. Ages describe people; "other" is a number whose meaning is
+ * unknown; start year and channel are context. None of these become unit-economics rows on their own.
+ */
+const ECONOMIC_CONCEPTS: FactConcept[] = ['selling_price', 'unit_cost', 'margin', 'volume', 'revenue', 'customers', 'order_quantity', 'aov', 'marketing_budget', 'shipping'];
+export const isEconomicFact = (f: FounderFact) => ECONOMIC_CONCEPTS.includes(f.concept) && !NON_ECONOMIC_CONCEPTS.includes(f.concept);
+/** Row produced by factRow(), stored in an earlier report: a restatement of exactly one founder fact. */
+const isFactRestatement = (row: UnitEconomicsRow) => /^FOUNDER-STATED \(LOCKED\) F\d+/.test(String(row.assumption || '')) && !!row.factId;
 const sameConcept = (fact: FounderFact, concept: string) => fact.concept === concept || (fact.concept === 'customers' && concept === 'volume');
 
 function semanticCandidates(row: UnitEconomicsRow, concept: string, facts: FounderFact[], rowClass: string): FounderFact[] {
   const rowWords = new Set(wordsOf(row.metric));
   const subjectWords = (f: FounderFact) => new Set(wordsOf(`${f.subject || ''} ${f.unit}`));
   const score = (f: FounderFact) => [...subjectWords(f)].filter((w) => rowWords.has(w)).length;
+  const unknownConcept = concept === 'other';
   const pool = facts.filter((f) => {
     if (AGE_CONCEPTS.includes(f.concept) || AGE_CONCEPTS.includes(concept)) return f.concept === concept; // ages: only the same age
-    if (f.concept === 'other' || concept === 'other') return f.concept === concept && score(f) > 0;       // never by catch-all alone
+    if (f.concept === 'other') return unknownConcept && score(f) > 0;                                      // meaningless facts: only by subject
+    if (unknownConcept) return score(f) > 0 && (cls(f.timeframe) === rowClass || valuesMatch(row, f));     // "Physical book sales target" → the physical-books fact
     return sameConcept(f, concept) && cls(f.timeframe) === rowClass;
   });
-  // A row naming another fact's subject ("digital") is not about this fact ("physical").
-  const distinct = (f: FounderFact) => { const mine = subjectWords(f); return [...mine].filter((w) => !pool.every((g) => g === f || subjectWords(g).has(w))); };
-  const contradicted = (f: FounderFact) => score(f) === 0 && pool.some((g) => g !== f && distinct(g).some((w) => rowWords.has(w)));
-  const ok = pool.filter((f) => !contradicted(f));
-  if (ok.length <= 1) return ok;
-  const best = Math.max(...ok.map(score));
-  const top = ok.filter((f) => score(f) === best);
-  return best > 0 && top.length === 1 ? top : ok; // still several → caller treats as ambiguous
+  const ok = pool.filter((f) => !contradicts(row, f, facts));
+  if (ok.length > 1) {
+    const best = Math.max(...ok.map(score));
+    const top = ok.filter((f) => score(f) === best);
+    return best > 0 && top.length === 1 ? top : ok; // still several → caller treats as ambiguous
+  }
+  if (ok.length === 1) return ok;
+  // Last resort: the row restates exactly one economic founder figure (same values) and nothing in its label conflicts.
+  const same = facts.filter((f) => isEconomicFact(f) && valuesMatch(row, f) && (unknownConcept || sameConcept(f, concept)) && !contradicts(row, f, facts));
+  return same.length === 1 ? same : [];
+}
+
+/** A row conflicts with a fact if it is about a different kind of thing, or names a different fact's subject. */
+function contradicts(row: UnitEconomicsRow, fact: FounderFact, facts: FounderFact[]): boolean {
+  const concept = row.concept as string;
+  if (AGE_CONCEPTS.includes(concept) !== AGE_CONCEPTS.includes(fact.concept)) return true;
+  if (concept !== 'other' && !sameConcept(fact, concept)) return true;
+  const rowWords = new Set(wordsOf(row.metric));
+  const subjectWords = (f: FounderFact) => new Set(wordsOf(`${f.subject || ''} ${f.unit}`));
+  const mine = subjectWords(fact);
+  // Compare only with facts of the same kind ("book" is not distinctive between two book targets).
+  const others = facts.filter((g) => g !== fact && (sameConcept(g, fact.concept) || sameConcept(fact, g.concept)));
+  const distinctOf = (g: FounderFact) => [...subjectWords(g)].filter((w) => !mine.has(w));
+  const namesOther = others.some((g) => distinctOf(g).some((w) => rowWords.has(w)));
+  const namesMine = [...mine].some((w) => rowWords.has(w) && !others.every((g) => subjectWords(g).has(w)));
+  return namesOther && !namesMine;
 }
 
 export function validateReport(report: AuditReport, factsIn?: FounderFact[] | null): { report: AuditReport; log: ValidationLog } {
@@ -187,6 +215,22 @@ export function validateReport(report: AuditReport, factsIn?: FounderFact[] | nu
     // 0b. Ages describe people, not the business: they are founder facts, never unit-economics rows.
     if (AGE_CONCEPTS.includes(row.concept as string)) {
       log.downgraded.push({ metric: row.metric, reason: 'an age is a founder fact, not a unit-economics metric; removed' });
+      continue;
+    }
+    // 0c. A row an earlier validation generated from a founder fact is that fact, not a new claim: refresh it from
+    //     the fact (current label, subject) — or drop it when the fact is not a unit-economics quantity. Never
+    //     downgrade it to an assumption (that is what produced "Founder stated" + "Assumption" duplicates).
+    // A generic "stated figure" row (the old label for a number of unknown meaning) says nothing about the business.
+    if (!isFactRestatement(row) && /^(?:current |target |proposed |conditional )?stated figure\b/i.test(row.metric.trim())) {
+      log.downgraded.push({ metric: row.metric, reason: 'generic figure with no stated meaning; removed' });
+      continue;
+    }
+    if (isFactRestatement(row)) {
+      const f = byId.get(row.factId!);
+      if (!f || !isEconomicFact(f)) { log.downgraded.push({ metric: row.metric, reason: 'restates a founder fact that is not a unit-economics quantity; removed' }); continue; }
+      if (usedFacts.has(f.id)) continue;
+      usedFacts.add(f.id);
+      out.push(fixUnit(factRow(f), log));
       continue;
     }
     // 1. Proposed pricing is never revenue: a revenue row equal to a founder price is converted back.
@@ -223,9 +267,11 @@ export function validateReport(report: AuditReport, factsIn?: FounderFact[] | nu
     const rowClass = cls(row.timeframe!) === 'projection' && (STATIC_CONCEPTS.includes(concept) || !legitimateProjection) ? 'now' : cls(row.timeframe!);
     const candidates = semanticCandidates(row, concept, facts, rowClass);
     let fact = row.factId ? byId.get(row.factId) : undefined;
-    // A cited fact must be one this row is semantically about; otherwise the citation is ignored.
-    if (fact && !candidates.includes(fact)) fact = undefined;
+    // A cited fact must be one this row is about: a semantic candidate, or the same figure with no conflicting label.
+    // (A fact of unknown meaning — concept "other" — is never accepted on equal value alone: its meaning must match.)
+    if (fact && !candidates.includes(fact) && !(fact.concept !== 'other' && valuesMatch(row, fact) && !contradicts(row, fact, facts))) fact = undefined;
     if (!fact) fact = candidates.length === 1 ? candidates[0] : undefined;
+    if (fact && !NON_ECONOMIC_CONCEPTS.includes(fact.concept) && concept === 'other' && fact.concept !== 'other') row = { ...row, concept: fact.concept as RowConcept };
 
     if (fact && rowClass !== 'projection') {
       if (valuesMatch(row, fact)) {
@@ -253,8 +299,9 @@ export function validateReport(report: AuditReport, factsIn?: FounderFact[] | nu
   }
 
   // 4. Every numeric founder fact appears in unit economics.
-  // Facts about people (founder age, audience age) are founder facts but not economics: never unit-economics rows.
-  const missing = facts.filter((f) => !NON_ECONOMIC_CONCEPTS.includes(f.concept) && !usedFacts.has(f.id) && !out.some((r) => r.factId === f.id)).map((f) => { log.insertedFacts.push(f.id); return factRow(f); });
+  // Only economically relevant founder facts are added (with their subject in the label). Ages, unknown-meaning
+  // "other" numbers, start year and channels stay founder facts but never become generic unit-economics rows.
+  const missing = facts.filter((f) => isEconomicFact(f) && !usedFacts.has(f.id) && !out.some((r) => r.factId === f.id)).map((f) => { log.insertedFacts.push(f.id); return factRow(f); });
   rows = [...missing, ...out];
 
   // 5. Narrative contradictions → visible note (narrative is not silently rewritten).

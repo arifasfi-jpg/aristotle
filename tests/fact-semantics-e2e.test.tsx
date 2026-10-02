@@ -33,7 +33,13 @@ describe.skipIf(!E2E)('Aaira Books founder facts and claims (real Postgres)', ()
         : k === 'plan' ? { businessModel: { summary: 'Kids quiz books', customer: 'Kids 8–15', payer: 'Parents', offering: 'Quiz books', revenueMechanism: 'Per copy', keyActivities: [], regulatedActivities: [] }, questions: ['a', 'b', 'c', 'd'].map((x) => ({ category: 'DEMAND', question: `Q ${x}?`, whyItMatters: 'x', query: `kids quiz books india ${x}` })) }
         : { ...deterministicAudit({ idea: AAIRA, sector: 'Edtech' }), oneLineVerdict: 'v', customer: { icp: 'Parents', problem: PROBLEM, willingnessToPay: 'Unknown' }, marketView: { marketType: 'Books', demandSignal: 'Unknown', competition: COMPETITION, marketRisk: 'Distribution' },
           // The reproduced bad output: an age row pointing at a sales target.
-          unitEconomics: [{ metric: 'Founder age', conservative: 5000, base: 5000, upside: 5000, unit: 'number', commentary: '', assumption: 'FOUNDER-STATED', provenance: 'FOUNDER_STATED', factId: 'F3', concept: 'other', timeframe: 'CURRENT' }] };
+          unitEconomics: [
+            { metric: 'Founder age', conservative: 5000, base: 5000, upside: 5000, unit: 'number', commentary: '', assumption: 'FOUNDER-STATED', provenance: 'FOUNDER_STATED', factId: 'F3', concept: 'other', timeframe: 'CURRENT' },
+            // Restatements under natural names (one mislabelled as an assumption) + AI-proposed prices.
+            { metric: 'Physical book sales target', conservative: 5000, base: 5000, upside: 5000, unit: 'books', commentary: '', assumption: '', provenance: 'FOUNDER_STATED', factId: 'F3', concept: 'other', timeframe: 'TARGET' },
+            { metric: 'Digital book sales target', conservative: 1000, base: 1000, upside: 1000, unit: 'books', commentary: '', assumption: 'ASSUMPTION', provenance: 'ASSUMPTION', concept: 'other', timeframe: 'TARGET' },
+            { metric: 'Physical book price', conservative: 299, base: 299, upside: 299, unit: '₹ / book', commentary: '', assumption: 'ASSUMPTION', provenance: 'ASSUMPTION', concept: 'selling_price', timeframe: 'PROPOSED', basis: 'AI-proposed validation price' },
+          ] };
       return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(data) }] } }], usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1 } }), { status: 200 });
     }));
     const { db } = await import('@/lib/db') as { db: any }; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -55,13 +61,22 @@ describe.skipIf(!E2E)('Aaira Books founder facts and claims (real Postgres)', ()
     expect(decisionFacts).toContain('Target volume: 1,000 digital books');
     const report = JSON.parse((await db.audit.findUnique({ where: { id: created.auditId } })).report);
     expect(report.unitEconomics.some((r: { metric: string }) => /age/i.test(r.metric))).toBe(false);
-    expect(report.unitEconomics.filter((r: any) => r.provenance === 'FOUNDER_STATED').map((r: any) => [r.metric, r.base])).toEqual(expect.arrayContaining([['Target volume — physical books (founder-stated)', 5000], ['Target volume — digital books (founder-stated)', 1000]])); // eslint-disable-line @typescript-eslint/no-explicit-any
+    // Each founder target exactly once, founder-stated, under its semantic name; no generic or duplicate assumption rows.
+    expect(report.unitEconomics.filter((r: any) => r.provenance === 'FOUNDER_STATED').map((r: any) => [r.metric, r.base])).toEqual([['Physical book sales target', 5000], ['Digital book sales target', 1000]]); // eslint-disable-line @typescript-eslint/no-explicit-any
+    expect(report.unitEconomics.some((r: { metric: string }) => /stated figure/i.test(r.metric))).toBe(false);
+    expect(report.unitEconomics.filter((r: any) => [5000, 1000].includes(r.base) && r.provenance !== 'FOUNDER_STATED')).toEqual([]); // eslint-disable-line @typescript-eslint/no-explicit-any
     expect(report.claimProvenance['customer.problem'].label).toBe('HYPOTHESIS');
     expect(report.claimProvenance['marketView.competition'].label).toBe('HYPOTHESIS');
 
     const { renderToStaticMarkup } = await import('react-dom/server');
     const page = renderToStaticMarkup(await (await import('@/app/objectives/[id]/page')).default({ params: Promise.resolve({ id: created.objectiveId }) }));
     expect(page).not.toMatch(/Founder age<\/td>/);
+    expect(page).not.toContain('Current stated figure');
+    expect(page).toMatch(/Physical book sales target<\/td><td[^>]*>5,000/);
+    // The AI-proposed price is never shown as a founder figure: evidence grounding lists it as "not yet established".
+    expect(report.unitEconomics.find((r: { metric: string }) => r.metric === 'Physical book price')?.provenance ?? 'NOT_SHOWN_AS_FIGURE').not.toBe('FOUNDER_STATED');
+    expect(report.unknownEconomics.map((u: { metric: string }) => u.metric)).toContain('Physical book price');
+    expect(page).toContain('Physical book price');
     expect(page).toContain('Hypothesis — not established by research');
     expect(page).toContain('This problem occurs daily.');
     const memory = await db.businessMemory.findMany({ where: { objectiveId: created.objectiveId, status: 'FOUNDER_STATED', kind: 'FACT' }, select: { title: true } });
@@ -75,7 +90,9 @@ describe.skipIf(!E2E)('Aaira Books founder facts and claims (real Postgres)', ()
     const user = await db.user.create({ data: { name: 'A' } });
     const org = await db.organization.create({ data: { founderId: (await db.founder.create({ data: { userId: user.id } })).id, name: 'Aaira Books' } });
     const stored = { ...deterministicAudit({ idea: AAIRA, sector: 'Edtech' }), customer: { icp: 'Parents', problem: PROBLEM, willingnessToPay: 'Unknown' }, marketView: { marketType: 'Books', demandSignal: 'Unknown', competition: COMPETITION, marketRisk: 'r' },
-      unitEconomics: [{ metric: 'Founder age', conservative: 5000, base: 5000, upside: 5000, unit: 'number', commentary: '', assumption: 'FOUNDER-STATED (LOCKED) F2', provenance: 'FOUNDER_STATED', factId: 'F2', concept: 'other', timeframe: 'CURRENT' }] };
+      unitEconomics: [{ metric: 'Founder age', conservative: 5000, base: 5000, upside: 5000, unit: 'number', commentary: '', assumption: 'FOUNDER-STATED (LOCKED) F2', provenance: 'FOUNDER_STATED', factId: 'F2', concept: 'other', timeframe: 'CURRENT' },
+        // Generic rows stored by earlier validation, and the duplicate "Assumption" set display re-validation used to add.
+        ...[15, 5000].flatMap((v, i) => [{ metric: 'Current stated figure (founder-stated)', conservative: v, base: v, upside: v, unit: 'number', commentary: '', assumption: `FOUNDER-STATED (LOCKED) F${i + 1}: "${v}"`, provenance: 'FOUNDER_STATED', factId: `F${i + 1}`, concept: 'other', timeframe: 'CURRENT' }, { metric: 'Current stated figure (founder-stated)', conservative: v, base: v, upside: v, unit: 'number', commentary: '', assumption: 'ASSUMPTION: ', provenance: 'ASSUMPTION', concept: 'other', timeframe: 'CURRENT' }])] };
     const audit = await db.audit.create({ data: { userId: user.id, idea: AAIRA, sector: 'Edtech', assumptions: '[]', report: JSON.stringify(stored), status: 'completed', paymentStatus: 'paid', paymentRef: 'pay_OLD' } });
     // Facts exactly as the old extractor stored them: meaningless "other" numbers.
     await db.projectFile.create({ data: { auditId: audit.id, path: 'founder-facts.json', content: JSON.stringify({ version: 1, confirmedAt: '', facts: [
@@ -90,6 +107,8 @@ describe.skipIf(!E2E)('Aaira Books founder facts and claims (real Postgres)', ()
     expect(page).toContain('Hypothesis — not established by research');
     const aristotle = renderToStaticMarkup(await (await import('@/app/audit/[id]/page')).default({ params: Promise.resolve({ id: audit.id }) }));
     expect(aristotle).not.toContain('>Founder age<');
+    expect(page).not.toContain('Current stated figure');
+    expect(aristotle).not.toContain('Current stated figure');
     expect(aristotle).toContain('Hypothesis — not established by research');
   }, 30_000);
 });

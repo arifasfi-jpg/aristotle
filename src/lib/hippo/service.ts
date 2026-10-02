@@ -16,15 +16,34 @@ import { normalisePathways, PATHWAYS_SCHEMA, pathwaysPrompt } from './pathways';
 import { canExecuteNow, workPaymentPlan } from './payments';
 import { classifyInputs, itemKey, type BriefInput, type ProvenanceContext } from './provenance';
 import { ensureAudit, parseReport, syncAristotle, understandObjective } from './aristotle';
-import { advanceTo, businessName, DEMO_COMPANY_NAME, isExecutionMode, isGenericOrgName, PROVIDER_TIERS, type EffortModel, type PathwaysResult, type Understanding } from './types';
+import { advanceTo, businessName, DEMO_COMPANY_NAME, isExecutionMode, PROVIDER_TIERS, type EffortModel, type PathwaysResult, type Understanding } from './types';
 
-type Org = { id: string };
-type Objective = { id: string; organizationId: string; text: string; stage: string; auditId: string | null; understanding: Prisma.JsonValue; selectedPathways: Prisma.JsonValue };
+type Org = { id: string; isDemo?: boolean; name?: string };
+type Objective = { id: string; organizationId: string; companyName: string | null; text: string; stage: string; auditId: string | null; understanding: Prisma.JsonValue; selectedPathways: Prisma.JsonValue };
 const json = (v: unknown) => v as Prisma.InputJsonValue;
 
-/** The founder's business name for AI prompts (null when unnamed). Never the platform's own name. */
-async function companyFor(organizationId: string) {
-  return businessName((await db.organization.findUnique({ where: { id: organizationId }, select: { name: true } }))?.name);
+/** The founder's business name for this objective's AI prompts (null when unnamed or ambiguous). Never the platform's own name. */
+async function companyFor(
+  objective: { companyName?: string | null; organizationId: string }
+): Promise<string | null> {
+  // Per-objective name is authoritative and immutable — always use it when set.
+  if (objective.companyName != null) return businessName(objective.companyName);
+
+  // Fallback path: only reached for legacy rows where companyName = NULL (created before this fix).
+  // Only safe when this org has exactly one objective (the org name unambiguously belongs to it).
+  // For multi-objective orgs, the org name is ambiguous — it may have been overwritten by the bug.
+  // Returning null is intentionally conservative: a wrong identity is worse than no identity.
+  const [org, objectiveCount] = await Promise.all([
+    db.organization.findUnique({ where: { id: objective.organizationId }, select: { name: true } }),
+    db.objective.count({ where: { organizationId: objective.organizationId } }),
+  ]);
+
+  if (objectiveCount > 1) {
+    // Multi-objective org: org name is ambiguous for this objective. Return null.
+    // identityBlock(null) produces a neutral prompt with no company identity assumption.
+    return null;
+  }
+  return businessName(org?.name);
 }
 
 /** Everything an input value may legitimately trace to: the founder's words, confirmed facts, approvals, verified findings. */
@@ -42,24 +61,58 @@ async function logAi(orgId: string, objectiveId: string, workId: string | null, 
 }
 
 // ---------------------------------------------------------------- OBJECTIVE
-export async function createObjective(ctx: { user: { id: string }; founder: { id: string; name: string | null }; org: Org & { name?: string } }, input: { text: string; mode: 'IDEA' | 'EXPLORE'; timeCommitment?: string | null; isDemo?: boolean; companyName?: string | null }) {
+export async function createObjective(ctx: { user: { id: string }; founder: { id: string; name: string | null }; org: Org & { name?: string; isDemo?: boolean } }, input: { text: string; mode: 'IDEA' | 'EXPLORE'; timeCommitment?: string | null; isDemo?: boolean; companyName?: string | null }) {
   if (input.timeCommitment) await db.founder.update({ where: { id: ctx.founder.id }, data: { timeCommitment: input.timeCommitment } });
-  // The Organization is the founder's own business. Name it from the founder's input (or the fictional demo name),
-  // but never overwrite a name the founder already gave, and never use the platform's name.
-  const currentName = ctx.org.name ?? (await db.organization.findUnique({ where: { id: ctx.org.id }, select: { name: true } }))?.name;
-  const wanted = businessName(input.companyName) ?? (input.isDemo ? DEMO_COMPANY_NAME : null);
-  if (wanted && isGenericOrgName(currentName)) await db.organization.update({ where: { id: ctx.org.id }, data: { name: wanted } });
-  if (input.isDemo) await db.organization.update({ where: { id: ctx.org.id }, data: { isDemo: true } });
-  const objective = await db.objective.create({ data: { organizationId: ctx.org.id, text: input.text, mode: input.mode, isDemo: Boolean(input.isDemo) } });
-  await logActivity({ organizationId: ctx.org.id, objectiveId: objective.id, type: 'OBJECTIVE_CREATED', actor: 'Founder', message: `Founder set an objective: ${input.text.slice(0, 160)}` });
-  await remember({ organizationId: ctx.org.id, objectiveId: objective.id, kind: 'OBJECTIVE', title: input.text.slice(0, 300), status: 'FOUNDER_STATED', owner: 'Founder', source: input.isDemo ? 'Demo data' : 'Founder', refType: 'objective', refId: objective.id });
 
-  const u = await understandObjective(input.text, await companyFor(ctx.org.id));
-  if (u.meta) await logActivity({ organizationId: ctx.org.id, objectiveId: objective.id, type: 'AI_CALL', actor: 'Mogli', message: `Mogli used ${u.meta.provider}/${u.meta.model} for understand`, meta: u.meta });
+  // Resolve the per-objective company name:
+  // demo → always DEMO_COMPANY_NAME; non-demo → founder input or existing org name.
+  const companyNameForObjective =
+    input.isDemo
+      ? DEMO_COMPANY_NAME
+      : businessName(input.companyName) ?? businessName(ctx.org.name) ?? null;
+
+  let orgId = ctx.org.id;
+  if (input.isDemo) {
+    // Demo objectives always get a fresh isolated org — never touch the founder's live org.
+    const demoOrg = await db.organization.create({
+      data: { founderId: ctx.founder.id, name: DEMO_COMPANY_NAME, isDemo: true },
+    });
+    orgId = demoOrg.id;
+  } else {
+    // Belt-and-suspenders: getFounderContext() should always return a live org for non-demo
+    // creation, but assert here to catch any future bypass of that invariant.
+    if (ctx.org.isDemo) {
+      throw new Error('INVARIANT VIOLATION: attempted to attach a real objective to a demo org');
+    }
+    // Only rename the org on the very first objective — after that the name is frozen on the org.
+    const existingCount = await db.objective.count({ where: { organizationId: ctx.org.id } });
+    if (existingCount === 0) {
+      const wanted = businessName(input.companyName);
+      if (wanted) {
+        await db.organization.update({ where: { id: ctx.org.id }, data: { name: wanted } });
+      }
+    }
+  }
+
+  // companyName is stored on the objective row — immutable after creation.
+  const objective = await db.objective.create({
+    data: {
+      organizationId: orgId,
+      text: input.text,
+      mode: input.mode,
+      isDemo: Boolean(input.isDemo),
+      companyName: companyNameForObjective,
+    },
+  });
+  await logActivity({ organizationId: orgId, objectiveId: objective.id, type: 'OBJECTIVE_CREATED', actor: 'Founder', message: `Founder set an objective: ${input.text.slice(0, 160)}` });
+  await remember({ organizationId: orgId, objectiveId: objective.id, kind: 'OBJECTIVE', title: input.text.slice(0, 300), status: 'FOUNDER_STATED', owner: 'Founder', source: input.isDemo ? 'Demo data' : 'Founder', refType: 'objective', refId: objective.id });
+
+  const u = await understandObjective(input.text, await companyFor({ companyName: companyNameForObjective, organizationId: orgId }));
+  if (u.meta) await logActivity({ organizationId: orgId, objectiveId: objective.id, type: 'AI_CALL', actor: 'Mogli', message: `Mogli used ${u.meta.provider}/${u.meta.model} for understand`, meta: u.meta });
   if (u.error) console.error('Hippoturtle understand fell back to founder numbers:', u.error);
   const updated = await db.objective.update({ where: { id: objective.id }, data: { understanding: json(u.understanding), stage: 'UNDERSTAND' } });
   const audit = await ensureAudit(updated, ctx.user.id, ctx.founder.name);
-  await logActivity({ organizationId: ctx.org.id, objectiveId: objective.id, type: 'UNDERSTOOD', actor: 'Mogli', message: `Understood the objective. Key question: ${u.understanding.keyQuestion}`.slice(0, 300) });
+  await logActivity({ organizationId: orgId, objectiveId: objective.id, type: 'UNDERSTOOD', actor: 'Mogli', message: `Understood the objective. Key question: ${u.understanding.keyQuestion}`.slice(0, 300) });
   return { objectiveId: objective.id, auditId: audit.id, understanding: u.understanding };
 }
 
@@ -89,7 +142,7 @@ async function loadAristotle(objective: Objective) {
 export async function generatePathways(objective: Objective) {
   const { memo, report, research, facts } = await loadAristotle(objective);
   if (memo.pathways) return memo.pathways as unknown as PathwaysResult;
-  const r = await generateJson<unknown>('pathways', pathwaysPrompt({ objective: objective.text, understanding: objective.understanding as Understanding | null, facts, research, report, company: await companyFor(objective.organizationId) }), PATHWAYS_SCHEMA);
+  const r = await generateJson<unknown>('pathways', pathwaysPrompt({ objective: objective.text, understanding: objective.understanding as Understanding | null, facts, research, report, company: await companyFor(objective) }), PATHWAYS_SCHEMA);
   await logAi(objective.organizationId, objective.id, null, r, 'Aristotle');
   const result = normalisePathways(r.data, { findings: new Set((research?.findings || []).map((f) => f.id)), facts: new Set(facts.map((f) => f.id)) });
   await db.decisionMemo.update({ where: { id: memo.id }, data: { pathways: json(result), founderChecklist: json(result.founderChecklist) } });
@@ -125,7 +178,7 @@ export async function generateWork(objective: Objective) {
   const chosen = (result?.pathways || []).filter((p) => selected.includes(p.id));
   if (!chosen.length) throw new HttpError(409, 'Choose at least one pathway first.');
   const memory = await memoryBrief(objective.organizationId, objective.id);
-  const r = await generateJson<unknown>('plan', planPrompt({ objective: objective.text, understanding: objective.understanding as Understanding | null, pathways: chosen, experiments: report.experiments || [], thirtyDayPlan: report.thirtyDayPlan || [], memory, company: await companyFor(objective.organizationId) }), PLAN_SCHEMA);
+  const r = await generateJson<unknown>('plan', planPrompt({ objective: objective.text, understanding: objective.understanding as Understanding | null, pathways: chosen, experiments: report.experiments || [], thirtyDayPlan: report.thirtyDayPlan || [], memory, company: await companyFor(objective) }), PLAN_SCHEMA);
   await logAi(objective.organizationId, objective.id, null, r, 'Mogli');
   const plan = normalisePlan(r.data);
   if (await db.work.count({ where: { objectiveId: objective.id } })) return db.work.findMany({ where: { objectiveId: objective.id }, orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }] }); // concurrent request won
@@ -146,7 +199,7 @@ export async function prepareBrief(ctx: { work: { id: string; organizationId: st
   const cap = routeCapability(work.capability);
   const memory = await memoryBrief(objective.organizationId, objective.id);
   const provenance = await provenanceFor(objective);
-  const prompt = briefPrompt({ work, cap, objective: objective.text, memory, timeCommitment: ctx.founder.timeCommitment, company: await companyFor(objective.organizationId), facts: provenance.facts, findings: provenance.findings });
+  const prompt = briefPrompt({ work, cap, objective: objective.text, memory, timeCommitment: ctx.founder.timeCommitment, company: await companyFor(objective), facts: provenance.facts, findings: provenance.findings });
   const r = await generateJson<unknown>('brief', prompt, BRIEF_SCHEMA);
   await logAi(objective.organizationId, objective.id, work.id, r, 'Mogli');
   const brief = normaliseBrief(r.data, cap, provenance);
@@ -211,10 +264,28 @@ export async function executeWork(ctx: { work: { id: string; organizationId: str
   try {
     const memory = await memoryBrief(objective.organizationId, objective.id, 60);
     const research = objective.auditId ? (await getResearch(objective.auditId)) as ResearchRecord | null : null;
-    const r = await generateJson<unknown>('execute', executePrompt({ title: work.title, brief, cap, mode, memory, research: research ? researchBrief(research).slice(0, 12_000) : 'none', company: await companyFor(objective.organizationId) }), EXECUTE_SCHEMA);
+    const r = await generateJson<unknown>('execute', executePrompt({ title: work.title, brief, cap, mode, memory, research: research ? researchBrief(research).slice(0, 12_000) : 'none', company: await companyFor(objective) }), EXECUTE_SCHEMA);
     const out = normaliseOutput(r.data, cap, mode);
+    // Every AI-generated execution deliverable carries a machine-readable provenance marker.
+    // This is an output-level signal only — it does not replace the structured provenance system
+    // (FOUNDER_STATED / VERIFIED_FACT / ASSUMPTION / HYPOTHESIS / INFERENCE / UNKNOWN).
+    // The marker is UNCONDITIONAL: it must be present even when assumptions and founderInputsNeeded
+    // are empty (the model can embed invented statistics in prose without surfacing them as arrays).
+    const provenanceHeader = [
+      '<!-- HIPPOTURTLE_PROVENANCE: AI_GENERATED_DRAFT -->',
+      '',
+      '> **⚠ AI-generated draft — review before use in marketing, legal, or financial communications.**',
+      ...(out.founderInputsNeeded.length
+        ? ['>', '> **Founder inputs needed:**', ...out.founderInputsNeeded.map((x: string) => `> - ${x}`)]
+        : []),
+      ...(out.assumptions.length
+        ? ['>', '> **AI assumptions (not founder-approved):**', ...out.assumptions.slice(0, 5).map((x: string) => `> - ${x}`)]
+        : []),
+      '',
+    ].join('\n');
+    const taggedMarkdown = provenanceHeader + out.markdown;
     const waiting = mode === 'HYBRID' || cap.requiresProfessional;
-    await db.execution.update({ where: { id: execution.id }, data: { status: waiting ? 'WAITING_FOR_REVIEW' : 'COMPLETED', provider: r.provider, model: r.model, output: out.markdown, outputSummary: out.summary, inputTokens: r.inputTokens, outputTokens: r.outputTokens, costInr: r.costInr, input: json({ brief, capability: cap.id, assumptions: out.assumptions, founderInputsNeeded: out.founderInputsNeeded, professionalReviewRequired: out.professionalReviewRequired }), completedAt: new Date() } });
+    await db.execution.update({ where: { id: execution.id }, data: { status: waiting ? 'WAITING_FOR_REVIEW' : 'COMPLETED', provider: r.provider, model: r.model, output: taggedMarkdown, outputSummary: out.summary, inputTokens: r.inputTokens, outputTokens: r.outputTokens, costInr: r.costInr, input: json({ brief, capability: cap.id, assumptions: out.assumptions, founderInputsNeeded: out.founderInputsNeeded, professionalReviewRequired: out.professionalReviewRequired }), completedAt: new Date() } });
     await db.work.update({ where: { id: work.id }, data: { status: waiting ? 'WAITING_FOR_INPUT' : 'COMPLETED', completedAt: waiting ? null : new Date() } });
     await logAi(objective.organizationId, objective.id, work.id, r, cap.internalName);
     await logActivity({ organizationId: work.organizationId, objectiveId: objective.id, workId: work.id, type: 'EXECUTION_COMPLETED', actor: cap.internalName, message: `${waiting ? 'Draft ready for human review' : 'Completed'}: "${work.title}". Actual AI cost ₹${r.costInr.toFixed(2)}.` });

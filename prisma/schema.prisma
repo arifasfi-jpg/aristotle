@@ -107,6 +107,7 @@ model Objective {
   pathways          Json?
   selectedPathways  Json?
   isDemo            Boolean            @default(false)
+  companyName       String?            // per-objective business name; immutable after creation
   lastError         String?
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt

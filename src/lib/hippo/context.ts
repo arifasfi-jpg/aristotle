@@ -36,7 +36,17 @@ export async function getFounderContext(opts: { create?: boolean; name?: string 
     if (!opts.create) return { user, founder: null, org: null };
     founder = await db.founder.create({ data: { userId: user.id, name: opts.name || user.name || null } });
   }
-  let org = await db.organization.findFirst({ where: { founderId: founder.id }, orderBy: { createdAt: 'asc' } });
+  // Prefer the live (non-demo) org when one exists.
+  // Fallback to any org (including demo) only for pure demo-only sessions where no live org exists yet.
+  // This enforces the invariant: non-demo objective creation is always routed to the live org,
+  // even when a demo org (with an earlier createdAt) exists.
+  let org = await db.organization.findFirst({
+    where: { founderId: founder.id, isDemo: false },
+    orderBy: { createdAt: 'asc' },
+  });
+  if (!org) {
+    org = await db.organization.findFirst({ where: { founderId: founder.id }, orderBy: { createdAt: 'asc' } });
+  }
   if (!org && opts.create) org = await db.organization.create({ data: { founderId: founder.id, name: 'My company' } });
   return { user, founder, org };
 }
@@ -94,7 +104,7 @@ export async function remember(m: MemoryInput) {
  * founder-stated / sourced facts first, then AI proposals and records, explicitly marked as NOT facts.
  */
 export async function memoryBrief(organizationId: string, objectiveId: string, limit = 40): Promise<string> {
-  const rows = await db.businessMemory.findMany({ where: { organizationId, OR: [{ objectiveId }, { objectiveId: null }] }, orderBy: { occurredAt: 'desc' }, take: limit });
+  const rows = await db.businessMemory.findMany({ where: { organizationId, objectiveId }, orderBy: { occurredAt: 'desc' }, take: limit });
   if (!rows.length) return 'No business memory yet.';
   const line = (r: (typeof rows)[number]) => `- ${r.kind}: ${r.title}${r.value ? ` = ${r.value}` : ''}${r.source ? ` (source: ${r.source})` : ''}`;
   const group = (title: string, pick: (r: (typeof rows)[number]) => boolean) => { const g = rows.filter(pick); return g.length ? `${title}\n${g.map(line).join('\n')}` : ''; };

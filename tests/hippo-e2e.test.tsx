@@ -200,7 +200,7 @@ describe.skipIf(!E2E)('Hippoturtle founder journey (real Postgres)', () => {
     const mem = await html(pages.memory());
     await dump('memory', mem);
     await dump('home', renderToStaticMarkup((await import('@/app/page')).default()));
-    await dump('start', renderToStaticMarkup((await import('@/app/start/page')).default()));
+    await dump('start', renderToStaticMarkup(await (await import('@/app/start/page')).default()));
     for (const s of ['Decision history', 'Business truth layer', 'Sourced fact', 'Founder stated', 'Not yet established', 'Outcome of', 'Responded: 12']) expect(mem).toContain(s);
     const types = (await db.activityLog.findMany({ where: { objectiveId }, select: { type: true } })).map((a: { type: string }) => a.type);
     for (const t of ['OBJECTIVE_CREATED', 'ARISTOTLE_STARTED', 'RESEARCH_COMPLETED', 'DECISION_GENERATED', 'PATHWAYS_GENERATED', 'FOUNDER_DECISION', 'WORK_CREATED', 'COST_ESTIMATED', 'FOUNDER_CHOICE', 'EXECUTION_STARTED', 'EXECUTION_FAILED', 'EXECUTION_COMPLETED', 'QUOTE_RECEIVED', 'OUTCOME_RECORDED', 'AI_CALL']) expect(types).toContain(t);

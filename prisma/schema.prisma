@@ -15,6 +15,7 @@ model User {
   updatedAt DateTime @updatedAt
   sessions  Session[]
   audits    Audit[]
+  founder   Founder?
 }
 
 model Session {
@@ -60,4 +61,301 @@ model ProjectFile {
   createdAt DateTime @default(now())
   audit     Audit    @relation(fields: [auditId], references: [id], onDelete: Cascade)
   @@unique([auditId, path])
+}
+
+// ===========================================================================
+// HIPPOTURTLE — company-building organisation (additive; Aristotle tables above are unchanged)
+// Enumerations are stored as strings and validated in src/lib/hippo/types.ts.
+// ===========================================================================
+
+model Founder {
+  id             String         @id @default(cuid())
+  userId         String         @unique
+  name           String?
+  timeCommitment String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  user           User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organizations  Organization[]
+}
+
+model Organization {
+  id         String           @id @default(cuid())
+  founderId  String
+  name       String
+  isDemo     Boolean          @default(false)
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+  founder    Founder          @relation(fields: [founderId], references: [id], onDelete: Cascade)
+  objectives Objective[]
+  ideas      BusinessIdea[]
+  work       Work[]
+  providers  Provider[]
+  memory     BusinessMemory[]
+  activity   ActivityLog[]
+  @@index([founderId])
+}
+
+model Objective {
+  id                String             @id @default(cuid())
+  organizationId    String
+  text              String
+  mode              String             @default("IDEA")
+  stage             String             @default("FOUNDER_OBJECTIVE")
+  understanding     Json?
+  auditId           String?            @unique
+  pathways          Json?
+  selectedPathways  Json?
+  isDemo            Boolean            @default(false)
+  lastError         String?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  organization      Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  idea              BusinessIdea?
+  questions         ResearchQuestion[]
+  findings          ResearchFinding[]
+  evidence          Evidence[]
+  memo              DecisionMemo?
+  work              Work[]
+  outcomes          Outcome[]
+  @@index([organizationId, createdAt])
+}
+
+model BusinessIdea {
+  id                  String       @id @default(cuid())
+  organizationId      String
+  objectiveId         String       @unique
+  summary             String
+  customer            String
+  payer               String
+  offering            String
+  revenueMechanism    String
+  keyActivities       Json
+  regulatedActivities Json
+  createdAt           DateTime     @default(now())
+  organization        Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  objective           Objective    @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+}
+
+model ResearchQuestion {
+  id           String    @id @default(cuid())
+  objectiveId  String
+  code         String
+  category     String
+  question     String
+  whyItMatters String
+  query        String
+  status       String
+  createdAt    DateTime  @default(now())
+  objective    Objective @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+  @@unique([objectiveId, code])
+}
+
+model ResearchFinding {
+  id           String    @id @default(cuid())
+  objectiveId  String
+  code         String
+  questionCode String
+  statement    String
+  quote        String
+  sourceTitle  String
+  sourceUrl    String
+  retrievedAt  DateTime?
+  geography    String
+  confidence   String
+  createdAt    DateTime  @default(now())
+  objective    Objective @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+  @@unique([objectiveId, code])
+}
+
+model Evidence {
+  id          String    @id @default(cuid())
+  objectiveId String
+  claim       String
+  type        String
+  status      String
+  sourceRefs  Json
+  confidence  String
+  validation  String
+  createdAt   DateTime  @default(now())
+  objective   Objective @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+  @@index([objectiveId])
+}
+
+model DecisionMemo {
+  id               String    @id @default(cuid())
+  objectiveId      String    @unique
+  auditId          String
+  content          Json
+  pathways         Json?
+  founderChecklist Json?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  objective        Objective @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+}
+
+model Work {
+  id                 String          @id @default(cuid())
+  organizationId     String
+  objectiveId        String
+  title              String
+  description        String
+  deliverable        String
+  capability         String
+  status             String          @default("DRAFT")
+  priority           Int             @default(3)
+  estimatedCost      Float?
+  currency           String          @default("INR")
+  executionMode      String?
+  selectedProviderId String?
+  pathwayId          String?
+  aiExecutable       Boolean         @default(true)
+  paymentStatus      String          @default("NOT_REQUIRED")
+  amountPaise        Int?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+  completedAt        DateTime?
+  organization       Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  objective          Objective       @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+  brief              WorkBrief?
+  estimates          CostEstimate[]
+  quotes             Quote[]
+  executions         Execution[]
+  outcomes           Outcome[]
+  @@index([organizationId, status])
+  @@index([objectiveId])
+}
+
+model WorkBrief {
+  id              String   @id @default(cuid())
+  workId          String   @unique
+  objective       String
+  deliverable     String
+  inputs          Json
+  constraints     Json
+  successCriteria Json
+  expectedOutput  String
+  outOfScope      Json
+  effort          Json
+  provider        String?
+  model           String?
+  createdAt       DateTime @default(now())
+  work            Work     @relation(fields: [workId], references: [id], onDelete: Cascade)
+}
+
+model CostEstimate {
+  id        String   @id @default(cuid())
+  workId    String
+  mode      String
+  low       Float
+  high      Float
+  currency  String   @default("INR")
+  label     String
+  basis     String
+  breakdown Json
+  drivers   Json
+  createdAt DateTime @default(now())
+  work      Work     @relation(fields: [workId], references: [id], onDelete: Cascade)
+  @@index([workId])
+}
+
+model Provider {
+  id             String        @id @default(cuid())
+  organizationId String?
+  name           String
+  tier           String
+  capability     String
+  website        String?
+  addedBy        String
+  createdAt      DateTime      @default(now())
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  quotes         Quote[]
+  @@index([organizationId])
+}
+
+model Quote {
+  id             String   @id @default(cuid())
+  workId         String
+  providerId     String
+  amount         Float
+  currency       String   @default("INR")
+  includes       Json
+  excludes       Json
+  turnaroundDays Int?
+  revisions      Int?
+  status         String   @default("RECEIVED")
+  source         String
+  comparison     Json?
+  createdAt      DateTime @default(now())
+  work           Work     @relation(fields: [workId], references: [id], onDelete: Cascade)
+  provider       Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  @@index([workId])
+}
+
+model Execution {
+  id            String    @id @default(cuid())
+  workId        String
+  mode          String
+  status        String
+  provider      String?
+  model         String?
+  input         Json
+  output        String?
+  outputSummary String?
+  inputTokens   Int       @default(0)
+  outputTokens  Int       @default(0)
+  costInr       Float     @default(0)
+  error         String?
+  startedAt     DateTime  @default(now())
+  completedAt   DateTime?
+  work          Work      @relation(fields: [workId], references: [id], onDelete: Cascade)
+  @@index([workId])
+}
+
+model Outcome {
+  id          String    @id @default(cuid())
+  objectiveId String
+  workId      String?
+  summary     String
+  metrics     Json
+  recordedBy  String
+  createdAt   DateTime  @default(now())
+  objective   Objective @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
+  work        Work?     @relation(fields: [workId], references: [id], onDelete: Cascade)
+  @@index([objectiveId])
+}
+
+model BusinessMemory {
+  id             String       @id @default(cuid())
+  organizationId String
+  objectiveId    String?
+  kind           String
+  title          String
+  detail         String
+  value          String?
+  status         String
+  source         String?
+  sourceUrl      String?
+  owner          String
+  confidence     String?
+  refType        String?
+  refId          String?
+  occurredAt     DateTime     @default(now())
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  @@index([organizationId, occurredAt])
+}
+
+model ActivityLog {
+  id             String       @id @default(cuid())
+  organizationId String
+  objectiveId    String?
+  workId         String?
+  type           String
+  message        String
+  actor          String
+  meta           Json?
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  @@index([organizationId, createdAt])
 }

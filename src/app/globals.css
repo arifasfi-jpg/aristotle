@@ -1,8 +1,32 @@
 @import "tailwindcss";
 
-:root { --bg:#070a0f; --panel:#0d121a; --line:#202938; --text:#f4f7fb; --muted:#93a0b5; --accent:#77e2c1; }
+/* Hippoturtle (default, light-first) */
+:root {
+  --ink:#0B1533; --navy:#0B1533; --midnight:#111F4D; --indigo:#4F46E5; --electric:#3B6CFF; --saffron:#FF8A1F;
+  --ivory:#FBF7EF; --card:#FFFFFF; --line:#E9E2D4; --muted:#5B6478; --soft:#F3EEE3;
+}
 * { box-sizing:border-box; }
-html { background:var(--bg); color:var(--text); }
-body { margin:0; background: radial-gradient(circle at 80% -10%, rgba(119,226,193,.10), transparent 35%), var(--bg); min-height:100vh; }
+html { background:var(--ivory); color:var(--ink); }
+body { margin:0; background:var(--ivory); min-height:100vh; font-family:"Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; -webkit-font-smoothing:antialiased; }
 button, input, textarea, select { font:inherit; }
-::selection { background:#77e2c1; color:#06100c; }
+::selection { background:#FFD7B0; color:#0B1533; }
+.ht-hero { background: radial-gradient(1000px 500px at 85% -10%, rgba(79,70,229,.55), transparent 60%), radial-gradient(700px 400px at 0% 110%, rgba(255,138,31,.22), transparent 60%), linear-gradient(160deg, #0B1533 0%, #111F4D 60%, #1A2A6B 100%); }
+.ht-grad-text { background: linear-gradient(90deg, #FFB067, #FF8A1F 40%, #8EA2FF); -webkit-background-clip:text; background-clip:text; color:transparent; }
+.ht-card { background:var(--card); border:1px solid var(--line); border-radius:22px; box-shadow:0 1px 0 rgba(11,21,51,.03), 0 12px 32px -18px rgba(11,21,51,.18); }
+.ht-prose h1 { font-size:1.6rem; font-weight:700; margin:1.4rem 0 .6rem; letter-spacing:-.01em; }
+.ht-prose h2 { font-size:1.25rem; font-weight:700; margin:1.3rem 0 .5rem; }
+.ht-prose h3 { font-size:1.05rem; font-weight:700; margin:1.1rem 0 .4rem; }
+.ht-prose p { margin:.6rem 0; line-height:1.75; }
+.ht-prose ul { list-style:disc; padding-left:1.3rem; margin:.5rem 0; } .ht-prose ol { list-style:decimal; padding-left:1.3rem; margin:.5rem 0; }
+.ht-prose li { margin:.25rem 0; line-height:1.65; }
+.ht-prose table { width:100%; border-collapse:collapse; margin:1rem 0; font-size:.9rem; display:block; overflow-x:auto; }
+.ht-prose th, .ht-prose td { border:1px solid var(--line); padding:.5rem .65rem; text-align:left; vertical-align:top; }
+.ht-prose th { background:var(--soft); }
+.ht-prose code { background:var(--soft); padding:.1rem .3rem; border-radius:6px; font-size:.85em; }
+.ht-prose blockquote { border-left:3px solid var(--saffron); padding-left:1rem; color:var(--muted); }
+.ht-prose a { color:var(--indigo); text-decoration:underline; }
+
+/* Aristotle's original dark report (kept unchanged under /audit and /history) */
+.aristotle-theme { --bg:#070a0f; --panel:#0d121a; --line:#202938; --text:#f4f7fb; --muted:#93a0b5; --accent:#77e2c1;
+  background: radial-gradient(circle at 80% -10%, rgba(119,226,193,.10), transparent 35%), #070a0f; color:#f4f7fb; min-height:100vh; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+.aristotle-theme ::selection { background:#77e2c1; color:#06100c; }

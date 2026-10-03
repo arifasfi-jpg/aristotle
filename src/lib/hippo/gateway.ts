@@ -7,7 +7,7 @@ import { fetchFailurePhase, sent } from '../ai-usage';
 import { callGeminiJson, cleanJson, geminiModel, type GeminiResult } from '../gemini';
 
 export type AiProvider = 'gemini' | 'openai' | 'anthropic';
-export type AiTask = 'understand' | 'pathways' | 'plan' | 'brief' | 'execute' | 'compare' | 'explore';
+export type AiTask = 'understand' | 'pathways' | 'plan' | 'brief' | 'execute' | 'compare' | 'explore' | 'converse';
 /** Aristotle engine calls (always Gemini: its prompts rely on Gemini response schemas and thinking settings). */
 export type AristotleTask = 'research-plan' | 'research-extract' | 'decision' | 'scope-classifier';
 
@@ -18,6 +18,7 @@ export type AristotleTask = 'research-plan' | 'research-extract' | 'decision' | 
  */
 export const TASK_ROUTE: Record<AiTask | AristotleTask | 'research-search', { purpose: UsagePurpose; tier: ModelTier; free?: boolean }> = {
   understand: { purpose: 'ARISTOTLE', tier: 0, free: true },
+  converse: { purpose: 'CONVERSATION', tier: 0, free: true }, // Hippo chat turns: cheapest tier, free-tier capped
   'scope-classifier': { purpose: 'ARISTOTLE', tier: 0, free: true },
   explore: { purpose: 'OPPORTUNITY', tier: 1, free: true },
   'research-plan': { purpose: 'RESEARCH', tier: 1 },
@@ -40,6 +41,7 @@ export const TASK_CONFIG: Record<AiTask, { temperature: number; maxOutputTokens:
   execute: { temperature: 0.5, maxOutputTokens: 9000, timeoutMs: 52_000 },
   compare: { temperature: 0.2, maxOutputTokens: 1200, timeoutMs: 25_000 },
   explore: { temperature: 0.8, maxOutputTokens: 2000, timeoutMs: 25_000 },
+  converse: { temperature: 0.6, maxOutputTokens: 900, timeoutMs: 15_000 },
 };
 
 const MODEL_ENV: Record<AiProvider, [string, string, string]> = {

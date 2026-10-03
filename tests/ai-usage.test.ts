@@ -49,10 +49,12 @@ describe('Router: every task has a purpose and a tier; models are configuration'
   it('purposes distinguish Aristotle, research, opportunity, work (and reserve conversation / Think Tank)', () => {
     expect(PURPOSES).toEqual(['CONVERSATION', 'ARISTOTLE', 'RESEARCH', 'OPPORTUNITY', 'THINK_TANK', 'WORK', 'OTHER']);
     expect(Object.fromEntries(Object.entries(TASK_ROUTE).map(([t, r]) => [t, r.purpose]))).toEqual({
+      // Phase 3A (intentional): the Hippo conversation is the first CONVERSATION task.
+      converse: 'CONVERSATION',
       understand: 'ARISTOTLE', 'scope-classifier': 'ARISTOTLE', explore: 'OPPORTUNITY', 'research-plan': 'RESEARCH', 'research-extract': 'RESEARCH', 'research-search': 'RESEARCH',
       decision: 'ARISTOTLE', pathways: 'ARISTOTLE', plan: 'WORK', brief: 'WORK', execute: 'WORK', compare: 'WORK',
     });
-    expect(FREE_TASKS.sort()).toEqual(['explore', 'scope-classifier', 'understand']); // reachable before any payment
+    expect(FREE_TASKS.sort()).toEqual(['converse', 'explore', 'scope-classifier', 'understand']); // reachable before any payment
   });
   it('a tier can be moved to another model by configuration only (provider key required)', () => {
     process.env.GEMINI_API_KEY = 'k'; delete process.env.OPENAI_API_KEY; delete process.env.HIPPO_AI_PROVIDER; process.env.GEMINI_MODEL = 'gemini-3.5-flash-lite';

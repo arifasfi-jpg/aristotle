@@ -11,7 +11,7 @@ vi.mock('@/lib/db', () => ({ db: {
   user: { create: async () => ({ id: `user_${++users}` }) },
 } }));
 
-const { sessionCookieName, currentOrGuestUser, getCurrentUser } = await import('../src/lib/session');
+const { sessionCookieName, currentOrGuestUser, getCurrentUser, freshStartAllowed, startFreshSession, switchToPreviousSession } = await import('../src/lib/session');
 const { isDue } = await import('../src/lib/jobs/runtime');
 
 const saved = { ...process.env };
@@ -60,5 +60,36 @@ describe('isDue: when polling may continue a job', () => {
     expect(isDue({ status: 'RUNNING', runAfter: past, leaseUntil: past }, now)).toBe(true);
     expect(isDue({ status: 'RUNNING', runAfter: past, leaseUntil: future }, now)).toBe(false); // a live worker owns it
     for (const status of ['COMPLETED', 'FAILED', 'WAITING', 'CANCELLED']) expect(isDue({ status, runAfter: past, leaseUntil: null }, now)).toBe(false);
+  });
+});
+
+describe('Start a New Business: session mechanics (no database)', () => {
+  it('only outside Production', () => {
+    expect(freshStartAllowed({ VERCEL_ENV: 'production' })).toBe(false);
+    expect(freshStartAllowed({ VERCEL_ENV: 'preview' })).toBe(true);
+    expect(freshStartAllowed({})).toBe(true); // local development
+  });
+  it('a fresh start is a new founder; the previous session stays valid and is kept for switching back; switching swaps them', async () => {
+    jar.clear(); deploy('preview', '3532728abc');
+    const a = await currentOrGuestUser();
+    const tokenA = jar.get('aristotle_session_3532728')!;
+    const b = await startFreshSession();
+    expect(b.id).not.toBe(a.id);
+    expect((await getCurrentUser())!.id).toBe(b.id);
+    expect((await getCurrentUser())!.id).toBe(b.id); // refresh keeps the fresh business
+    expect(JSON.parse(jar.get('aristotle_session_3532728_prev')!)).toEqual([tokenA]);
+    expect(await switchToPreviousSession(0)).toBe(true);
+    expect((await getCurrentUser())!.id).toBe(a.id);
+    expect(JSON.parse(jar.get('aristotle_session_3532728_prev')!)).toHaveLength(1);
+    expect(await switchToPreviousSession(0)).toBe(true); // and back again
+    expect((await getCurrentUser())!.id).toBe(b.id);
+    expect(await switchToPreviousSession(4)).toBe(false); // nothing there: unchanged
+    expect((await getCurrentUser())!.id).toBe(b.id);
+  });
+  it('a tampered previous-list cookie is ignored (only well-formed tokens of real sessions are honoured)', async () => {
+    jar.clear(); deploy('preview', '3532728abc');
+    await currentOrGuestUser();
+    jar.set('aristotle_session_3532728_prev', JSON.stringify(['not-a-token', 'f'.repeat(64)]));
+    expect(await switchToPreviousSession(0)).toBe(false); // 'f…f' is well-formed but no such session
   });
 });

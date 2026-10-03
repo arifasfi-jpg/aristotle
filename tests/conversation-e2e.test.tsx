@@ -97,7 +97,7 @@ describe.skipIf(!E2E)('Hippo conversation (real Postgres)', () => {
     const refreshed = await (await route.GET()).json();
     expect(refreshed.messages.map((m: Row) => m.text)).toEqual(v.messages.map((m: Row) => m.text));
     const { renderToStaticMarkup } = await import('react-dom/server');
-    const html = renderToStaticMarkup(await (await import('@/app/start/page')).default());
+    const html = renderToStaticMarkup(await (await import('@/app/start/page')).default({}));
     expect(html).toContain('We already sell 1,400 units a month. Distribution is the problem.');
     expect(html).toContain('Want me to dig in?');
     expect(html).toContain('Prefer a form?'); // 11: classic form with the demo example kept as a secondary path

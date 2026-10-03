@@ -141,11 +141,11 @@ describe.skipIf(!E2E)('Preview-only demo objective access (real Postgres)', () =
       expect(jar.size).toBe(0); // no session cookie issued
       const { renderToStaticMarkup } = await import('react-dom/server');
       const Start = (await import('@/app/start/page')).default;
-      expect(renderToStaticMarkup(await Start())).not.toContain('Open Demo Objective');
+      expect(renderToStaticMarkup(await Start({}))).not.toContain('Open Demo Objective');
     }
     preview();
     const { renderToStaticMarkup } = await import('react-dom/server');
-    expect(renderToStaticMarkup(await (await import('@/app/start/page')).default())).toContain('Open Demo Objective');
+    expect(renderToStaticMarkup(await (await import('@/app/start/page')).default({}))).toContain('Open Demo Objective');
   });
 });
 

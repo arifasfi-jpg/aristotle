@@ -42,3 +42,59 @@ export async function currentOrGuestUser() {
   await createSession(created.id);
   return created;
 }
+
+// ---------------------------------------------------------------- fresh business (Preview / local testing)
+const PREVIOUS_MAX = 5;
+const previousCookieName = (env: Record<string, string | undefined> = process.env) => `${sessionCookieName(env)}_prev`;
+const cookieOpts = { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax' as const, path: '/', maxAge: DAYS * 86400 };
+const hashOf = (token: string) => crypto.createHash('sha256').update(token).digest('hex');
+
+/** "Start a New Business" exists outside Production only (Preview, local). Production behaviour is unchanged. */
+export const freshStartAllowed = (env: Record<string, string | undefined> = process.env) => env.VERCEL_ENV !== 'production';
+
+async function previousTokens(): Promise<string[]> {
+  const raw = (await cookies()).get(previousCookieName())?.value;
+  try { const v = JSON.parse(raw || '[]'); return Array.isArray(v) ? v.filter((t) => typeof t === 'string' && /^[a-f0-9]{64}$/.test(t)).slice(0, PREVIOUS_MAX) : []; } catch { return []; }
+}
+
+/**
+ * Starts a genuinely fresh business: a new anonymous founder with its own session (so organisation, memory and company
+ * name cannot mix with the existing business). Nothing is deleted: the current session stays valid in the database
+ * and its token is kept in this browser's "previous businesses" list, so the founder can switch back.
+ */
+export async function startFreshSession() {
+  const jar = await cookies();
+  const current = jar.get(sessionCookieName())?.value;
+  const prev = await previousTokens();
+  const user = await db.user.create({ data: {} });
+  await createSession(user.id);
+  if (current && /^[a-f0-9]{64}$/.test(current)) jar.set(previousCookieName(), JSON.stringify([current, ...prev.filter((t) => t !== current)].slice(0, PREVIOUS_MAX)), cookieOpts);
+  return user;
+}
+
+/** The businesses this browser started earlier (most recent first), each with its latest objective, for switching back. */
+export async function previousBusinesses(): Promise<{ index: number; userId: string; objective: string | null }[]> {
+  const out: { index: number; userId: string; objective: string | null }[] = [];
+  for (const [index, token] of (await previousTokens()).entries()) {
+    const s = await db.session.findUnique({ where: { tokenHash: hashOf(token) }, include: { user: true } });
+    if (!s || s.expiresAt < new Date()) continue;
+    const o = await db.objective.findFirst({ where: { organization: { founder: { userId: s.userId } } }, orderBy: { createdAt: 'desc' }, select: { text: true } });
+    out.push({ index, userId: s.userId, objective: o?.text ?? null });
+  }
+  return out;
+}
+
+/** Switches this browser back to a previous business; the business it leaves joins the previous list. */
+export async function switchToPreviousSession(index: number): Promise<boolean> {
+  const jar = await cookies();
+  const prev = await previousTokens();
+  const target = prev[index];
+  if (!target) return false;
+  const s = await db.session.findUnique({ where: { tokenHash: hashOf(target) } });
+  if (!s || s.expiresAt < new Date()) return false;
+  const current = jar.get(sessionCookieName())?.value;
+  const rest = prev.filter((_, i) => i !== index);
+  jar.set(sessionCookieName(), target, cookieOpts);
+  jar.set(previousCookieName(), JSON.stringify([...(current && /^[a-f0-9]{64}$/.test(current) ? [current] : []), ...rest].slice(0, PREVIOUS_MAX)), cookieOpts);
+  return true;
+}

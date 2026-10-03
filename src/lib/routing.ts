@@ -10,6 +10,8 @@
 // launch plans, estimated volumes, "would order" or "we sell" pitch-speak are NOT evidence.
 // ---------------------------------------------------------------------------
 import crypto from 'crypto';
+import type { UsageContext } from './ai-usage';
+import { aristotleGeminiJson } from './hippo/gateway';
 import type { FounderFact } from './founder-facts';
 
 export const SCOPES = ['NEW_IDEA', 'GROWTH_PLAN', 'OUT_OF_SCOPE'] as const;
@@ -85,18 +87,13 @@ export function scopeInputHash(input: { idea: string; sector?: string | null; st
 // ---------------------------------------------------------------------------
 export type ClassifierResult = { scope: Scope; confidence: number; reason: string };
 
-export async function classifyWithGemini(input: { idea: string; sector?: string | null; stage?: string | null }): Promise<ClassifierResult> {
-  const key = process.env.GEMINI_API_KEY;
-  if (!key) throw new Error('classifier not configured');
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
-  try {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite'}:generateContent`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-      signal: controller.signal,
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: `Classify this request for Aristotle, an Indian venture-audit product.
+export async function classifyWithGemini(input: { idea: string; sector?: string | null; stage?: string | null }, usage?: UsageContext): Promise<ClassifierResult> {
+  if (!process.env.GEMINI_API_KEY) throw new Error('classifier not configured');
+  // Same model, prompt, schema and limits as before; now through the metered gateway (one AiUsage row per call).
+  const r = await aristotleGeminiJson<{ scope?: unknown; confidence?: unknown; reason?: unknown }>('scope-classifier', {
+    label: 'scope-classifier', timeoutMs: 8000, temperature: 0, maxOutputTokens: 200,
+    schema: { type: 'object', properties: { scope: { type: 'string', enum: [...SCOPES] }, confidence: { type: 'number' }, reason: { type: 'string' } }, required: ['scope', 'confidence', 'reason'] },
+    prompt: `Classify this request for Aristotle, an Indian venture-audit product.
 NEW_IDEA: the founder has not meaningfully operated this business yet (pricing, targets, launch plans and estimates do NOT mean it operates).
 GROWTH_PLAN: the business already operates — it has real sales, customers, revenue or operating history — and the founder wants to grow it.
 OUT_OF_SCOPE: not a business audit (personal investment, personal tax filing, medical advice, or asking to build software).
@@ -104,20 +101,10 @@ Return JSON only. confidence is between 0 and 1.
 
 Sector: ${input.sector || 'not given'}
 Stage: ${input.stage || 'not given'}
-Description: """${input.idea.slice(0, 4000)}"""` }] }],
-        generationConfig: {
-          temperature: 0, maxOutputTokens: 200, responseMimeType: 'application/json',
-          responseSchema: { type: 'object', properties: { scope: { type: 'string', enum: [...SCOPES] }, confidence: { type: 'number' }, reason: { type: 'string' } }, required: ['scope', 'confidence', 'reason'] },
-        },
-      }),
-    });
-    if (!res.ok) throw new Error(`classifier http ${res.status}`);
-    const json = (await res.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
-    const parsed = JSON.parse(json.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '{}');
-    if (!isScope(parsed.scope)) throw new Error('classifier returned an invalid scope');
-    const c = Number(parsed.confidence);
-    return { scope: parsed.scope, confidence: Number.isFinite(c) ? Math.max(0, Math.min(1, c)) : 0, reason: String(parsed.reason || '').slice(0, 300) };
-  } finally {
-    clearTimeout(timeout);
-  }
+Description: """${input.idea.slice(0, 4000)}"""`,
+  }, usage);
+  const parsed = r.data || {};
+  if (!isScope(parsed.scope)) throw new Error('classifier returned an invalid scope');
+  const c = Number(parsed.confidence);
+  return { scope: parsed.scope, confidence: Number.isFinite(c) ? Math.max(0, Math.min(1, c)) : 0, reason: String(parsed.reason || '').slice(0, 300) };
 }

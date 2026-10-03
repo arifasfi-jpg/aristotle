@@ -4,6 +4,7 @@ import { getCurrentUser } from '@/lib/session';
 import { extractFounderFacts, confirmFounderFacts } from '@/lib/founder-facts';
 import { classifyWithGemini, isScope, OUT_OF_SCOPE_MESSAGES, PAYABLE_SCOPES, SCOPE_PRICE_PAISE, scopeInputHash, suggestScope } from '@/lib/routing';
 import { getScopeRecord, saveFacts, saveScopeRecord, type ScopeRecord } from '@/lib/audit-meta';
+import { guardIp, guardUser } from '@/lib/rate-limit';
 
 const CLASSIFIER_CONFIDENT = 0.75;
 
@@ -57,8 +58,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
     if (action === 'classify') {
       if (rec.classifier && rec.classifier.inputHash === hash) return NextResponse.json(view(rec)); // cached: no repeat AI call
+      // An AI call before payment: rate-limited per IP and per user (new audits are free to create).
+      for (const g of [await guardIp(req, 'scope-classify'), await guardUser(user.id, 'scope-classify')]) {
+        if (!g.ok) return NextResponse.json({ error: g.error }, { status: g.status });
+      }
       try {
-        const r = await classifyWithGemini(audit);
+        const r = await classifyWithGemini(audit, { userId: user.id, auditId: audit.id, parentType: 'REQUEST' });
         rec.classifier = { inputHash: hash, at: new Date().toISOString(), ok: true, ...r };
       } catch (e) {
         console.error('Aristotle scope classifier failed:', e instanceof Error ? e.message : e);

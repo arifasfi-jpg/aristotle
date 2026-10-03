@@ -360,3 +360,72 @@ model ActivityLog {
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   @@index([organizationId, createdAt])
 }
+
+// ---------------------------------------------------------------- AI COST LEDGER (Phase 1)
+// One append-only row per model or search call, written by the metered gateway (src/lib/ai-usage.ts).
+// Ids are plain strings (no foreign keys) so the ledger survives deletes and never blocks a business write.
+model AiUsage {
+  id              String   @id @default(cuid())
+  createdAt       DateTime @default(now())
+  kind            String   // MODEL | SEARCH
+  purpose         String   // CONVERSATION | ARISTOTLE | RESEARCH | OPPORTUNITY | THINK_TANK | WORK | OTHER
+  task            String   // e.g. research-plan, research-extract, research-search, decision, scope-classifier, understand, explore, plan, brief, execute
+  tier            Int?
+  provider        String
+  model           String
+  inputTokens     Int      @default(0)
+  outputTokens    Int      @default(0)
+  cachedTokens    Int      @default(0)
+  reasoningTokens Int      @default(0)
+  searchCalls     Int      @default(0)
+  searchCredits   Int      @default(0)
+  estimatedInr    Float?
+  costInr         Float    @default(0)
+  priceSource     String   // MODEL_PRICE | UNPRICED_FALLBACK
+  priceId         String?
+  usdInr          Float
+  durationMs      Int      @default(0)
+  retries         Int      @default(0)
+  outcome         String   // OK | ERROR | TIMEOUT | INVALID_OUTPUT | REFUSED_BUDGET
+  error           String?
+  userId          String?
+  founderId       String?
+  organizationId  String?
+  objectiveId     String?
+  workId          String?
+  auditId         String?
+  parentType      String?  // TURN | JOB | WORK | AUDIT | REQUEST (only REQUEST/AUDIT/WORK are used before Phase 5)
+  parentId        String?
+  @@index([createdAt])
+  @@index([purpose, createdAt])
+  @@index([userId, createdAt])
+  @@index([organizationId, createdAt])
+  @@index([auditId])
+  @@index([provider, model])
+}
+
+// Price per provider/model (tokens) or per search credit. The newest active row with effectiveFrom <= now applies.
+model ModelPrice {
+  id                    String   @id @default(cuid())
+  provider              String
+  model                 String
+  inputUsdPerMTok       Float?
+  outputUsdPerMTok      Float?
+  cachedInputUsdPerMTok Float?
+  usdPerCredit          Float?
+  effectiveFrom         DateTime @default(now())
+  active                Boolean  @default(true)
+  source                String?  // where the price came from (URL / note)
+  createdAt             DateTime @default(now())
+  @@unique([provider, model, effectiveFrom])
+  @@index([provider, model])
+}
+
+// Fixed-window request counters for AI endpoints (abuse / cost protection). Atomic upsert per (key, window).
+model RateLimit {
+  key         String
+  windowStart DateTime
+  count       Int      @default(0)
+  @@id([key, windowStart])
+  @@index([windowStart])
+}

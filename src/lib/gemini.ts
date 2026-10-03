@@ -1,7 +1,8 @@
 // Minimal Gemini structured-output client shared by the research planner, evidence extractor and
 // decision stage. Every call has an explicit timeout so the whole audit fits the serverless limit.
 
-export type GeminiResult<T> = { data: T; inputTokens: number; outputTokens: number };
+/** Token counts as Gemini bills them: cached prompt tokens are a subset of inputTokens; thinking tokens are billed as output. */
+export type GeminiResult<T> = { data: T; inputTokens: number; outputTokens: number; cachedTokens: number; thinkingTokens: number; retries: number; model: string };
 
 export function cleanJson(text: string): string {
   const trimmed = text.trim();
@@ -26,10 +27,10 @@ export function fastThinkingConfig(model: string): Record<string, unknown> | und
   return undefined;
 }
 
-export async function callGeminiJson<T>(opts: { prompt: string; schema: unknown; timeoutMs: number; maxOutputTokens: number; temperature?: number; label: string; fastThinking?: boolean }): Promise<GeminiResult<T>> {
+export async function callGeminiJson<T>(opts: { prompt: string; schema: unknown; timeoutMs: number; maxOutputTokens: number; temperature?: number; label: string; fastThinking?: boolean; model?: string }): Promise<GeminiResult<T>> {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error('AI_ENGINE_NOT_CONFIGURED: GEMINI_API_KEY is missing');
-  const model = geminiModel();
+  const model = opts.model || geminiModel();
   const thinking = opts.fastThinking ? fastThinkingConfig(model) : undefined;
   const started = Date.now();
   const controller = new AbortController();
@@ -50,12 +51,13 @@ export async function callGeminiJson<T>(opts: { prompt: string; schema: unknown;
     }),
   });
   let res: Response;
+  let retries = 0;
   try {
     res = await send(true);
     // A model that rejects the thinking setting must not break the call: retry once without it (same deadline).
     if (res.status === 400 && thinking) {
       const body = await res.clone().text();
-      if (/thinking/i.test(body)) res = await send(false);
+      if (/thinking/i.test(body)) { retries = 1; res = await send(false); }
     }
   } catch (e) {
     const aborted = e instanceof Error && e.name === 'AbortError';
@@ -65,10 +67,13 @@ export async function callGeminiJson<T>(opts: { prompt: string; schema: unknown;
   }
   if (opts.fastThinking) console.log(JSON.stringify({ event: 'gemini_call', label: opts.label, model, ms: Date.now() - started, status: res.status }));
   if (!res.ok) throw new Error(`GEMINI_ERROR (${opts.label}): HTTP ${res.status}: ${(await res.text()).slice(0, 400)}`);
-  const json = (await res.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[]; usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number } };
+  const json = (await res.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[]; usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; cachedContentTokenCount?: number; thoughtsTokenCount?: number } };
+  const u = json.usageMetadata || {};
+  // A billed-but-unusable response still cost tokens: the error carries them so the ledger records the spend.
+  const billed = (e: Error) => Object.assign(e, { measured: { inputTokens: u.promptTokenCount || 0, outputTokens: u.candidatesTokenCount || 0, cachedTokens: u.cachedContentTokenCount || 0, reasoningTokens: u.thoughtsTokenCount || 0, retries } });
   const text = json.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
-  if (!text) throw new Error(`GEMINI_ERROR (${opts.label}): empty response`);
+  if (!text) throw billed(new Error(`GEMINI_ERROR (${opts.label}): empty response`));
   let data: T;
-  try { data = JSON.parse(cleanJson(text)) as T; } catch { throw new Error(`GEMINI_ERROR (${opts.label}): response was not valid JSON (possibly truncated)`); }
-  return { data, inputTokens: json.usageMetadata?.promptTokenCount || 0, outputTokens: json.usageMetadata?.candidatesTokenCount || 0 };
+  try { data = JSON.parse(cleanJson(text)) as T; } catch { throw billed(new Error(`GEMINI_ERROR (${opts.label}): response was not valid JSON (possibly truncated)`)); }
+  return { data, inputTokens: u.promptTokenCount || 0, outputTokens: u.candidatesTokenCount || 0, cachedTokens: u.cachedContentTokenCount || 0, thinkingTokens: u.thoughtsTokenCount || 0, retries, model };
 }

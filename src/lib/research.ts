@@ -11,7 +11,8 @@
 //
 // All stages run under a shared deadline so the whole audit fits the serverless time limit.
 // ---------------------------------------------------------------------------
-import { callGeminiJson } from './gemini';
+import type { UsageContext } from './ai-usage';
+import { aristotleGeminiJson, meteredSearch } from './hippo/gateway';
 import {
   CONFIDENCE, QUESTION_STATUS, RESEARCH_CATEGORIES,
   type BusinessModel, type Confidence, type Finding, type QuestionStatus, type ResearchCategory, type ResearchQuestion, type ResearchRecord, type ResearchSource,
@@ -115,9 +116,14 @@ export function normalisePlan(raw: unknown): ResearchPlan {
 // ---------------------------------------------------------------------------
 type TavilyResult = { title?: string; url?: string; content?: string; raw_content?: string | null };
 
-export async function tavilySearch(query: string, opts: { deep: boolean; geography?: string; timeoutMs: number }): Promise<TavilyResult[]> {
+export async function tavilySearch(query: string, opts: { deep: boolean; geography?: string; timeoutMs: number; usage?: UsageContext }): Promise<TavilyResult[]> {
   const key = process.env.TAVILY_API_KEY;
   if (!key) throw new Error('AI_ENGINE_NOT_CONFIGURED: TAVILY_API_KEY is missing');
+  // Every request is metered (2 credits: advanced depth); failed requests are recorded at no cost.
+  return meteredSearch({ provider: 'tavily', depth: 'advanced' }, opts.usage, () => tavilyRequest(key, query, opts));
+}
+
+async function tavilyRequest(key: string, query: string, opts: { deep: boolean; geography?: string; timeoutMs: number }): Promise<TavilyResult[]> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Math.max(1000, opts.timeoutMs));
   try {
@@ -218,7 +224,7 @@ const remaining = (deadline: number) => deadline - Date.now();
 export const isPlanCheckpoint = (r: ResearchRecord | null | undefined): r is ResearchRecord & { stage: 'PLANNED'; plan: ResearchPlan } => r?.version === 2 && r.stage === 'PLANNED' && Boolean(r.plan);
 export const planCheckpoint = (plan: ResearchPlan, at: Date): ResearchRecord => ({ version: 2, stage: 'PLANNED', retrievedAt: at.toISOString(), queries: plan.questions.map((q) => q.query), sources: [], businessModel: plan.businessModel, plan });
 
-export async function researchBusiness(input: ResearchInput, deadline: number, now = () => new Date(), opts: { plan?: ResearchPlan | null; onPlan?: (checkpoint: ResearchRecord) => Promise<void> } = {}): Promise<ResearchRecord> {
+export async function researchBusiness(input: ResearchInput, deadline: number, now = () => new Date(), opts: { plan?: ResearchPlan | null; onPlan?: (checkpoint: ResearchRecord) => Promise<void>; usage?: UsageContext } = {}): Promise<ResearchRecord> {
   const usage: Usage = { inputTokens: 0, outputTokens: 0, tavilySearches: 0 };
 
   // 1. PLAN (or reuse the plan saved by an earlier attempt)
@@ -226,7 +232,7 @@ export async function researchBusiness(input: ResearchInput, deadline: number, n
   if (!planResult) {
     const timeoutMs = planTimeoutMs(remaining(deadline));
     if (timeoutMs < PLAN_MIN_MS) throw new Error('AUDIT_TIME_BUDGET_EXCEEDED: not enough time left to plan research');
-    const plan = await callGeminiJson<unknown>({ label: 'research-plan', prompt: buildPlanPrompt(input), schema: PLAN_SCHEMA, maxOutputTokens: PLAN_MAX_OUTPUT_TOKENS, temperature: 0.1, timeoutMs, fastThinking: true });
+    const plan = await aristotleGeminiJson<unknown>('research-plan', { label: 'research-plan', prompt: buildPlanPrompt(input), schema: PLAN_SCHEMA, maxOutputTokens: PLAN_MAX_OUTPUT_TOKENS, temperature: 0.1, timeoutMs, fastThinking: true }, opts.usage);
     usage.inputTokens += plan.inputTokens; usage.outputTokens += plan.outputTokens;
     planResult = normalisePlan(plan.data);
     if (opts.onPlan) await opts.onPlan(planCheckpoint(planResult, now()));
@@ -236,7 +242,7 @@ export async function researchBusiness(input: ResearchInput, deadline: number, n
   // 2. SEARCH (parallel)
   const searchTimeout = Math.min(15000, remaining(deadline) - 22000);
   if (searchTimeout < 4000) throw new Error('AUDIT_TIME_BUDGET_EXCEEDED: not enough time left to research');
-  const searched = await Promise.allSettled(planned.map((q) => tavilySearch(q.query, { deep: q.category === 'REGULATION' || q.category === 'ALTERNATIVES_PRICING', geography: input.geography, timeoutMs: searchTimeout })));
+  const searched = await Promise.allSettled(planned.map((q) => tavilySearch(q.query, { deep: q.category === 'REGULATION' || q.category === 'ALTERNATIVES_PRICING', geography: input.geography, timeoutMs: searchTimeout, usage: opts.usage })));
   usage.tavilySearches = planned.length;
   if (searched.every((s) => s.status === 'rejected')) {
     throw new Error(`RESEARCH_FAILED: all searches failed (${(searched[0] as PromiseRejectedResult).reason instanceof Error ? ((searched[0] as PromiseRejectedResult).reason as Error).message : 'unknown'})`);
@@ -274,7 +280,7 @@ export async function researchBusiness(input: ResearchInput, deadline: number, n
   const extracted = await Promise.allSettled(planned.map(async (q) => {
     const srcs = perQuestion.get(q.id)!;
     if (srcs.length === 0) return null; // nothing to read → NOT FOUND without an AI call
-    const r = await callGeminiJson<unknown>({ label: `extract-${q.id}`, prompt: buildExtractPrompt(q, srcs, contentOf), schema: EXTRACT_SCHEMA, maxOutputTokens: 1500, temperature: 0, timeoutMs: extractTimeout });
+    const r = await aristotleGeminiJson<unknown>('research-extract', { label: `extract-${q.id}`, prompt: buildExtractPrompt(q, srcs, contentOf), schema: EXTRACT_SCHEMA, maxOutputTokens: 1500, temperature: 0, timeoutMs: extractTimeout }, opts.usage);
     usage.inputTokens += r.inputTokens; usage.outputTokens += r.outputTokens;
     return r.data;
   }));

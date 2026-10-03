@@ -112,7 +112,7 @@ export async function createObjective(ctx: { user: { id: string }; founder: { id
   await logActivity({ organizationId: orgId, objectiveId: objective.id, type: 'OBJECTIVE_CREATED', actor: 'Founder', message: `Founder set an objective: ${input.text.slice(0, 160)}` });
   await remember({ organizationId: orgId, objectiveId: objective.id, kind: 'OBJECTIVE', title: input.text.slice(0, 300), status: 'FOUNDER_STATED', owner: 'Founder', source: input.isDemo ? 'Demo data' : 'Founder', refType: 'objective', refId: objective.id });
 
-  const u = await understandObjective(input.text, await companyFor({ companyName: companyNameForObjective, organizationId: orgId }));
+  const u = await understandObjective(input.text, await companyFor({ companyName: companyNameForObjective, organizationId: orgId }), { userId: ctx.user.id, founderId: ctx.founder.id, organizationId: orgId, objectiveId: objective.id, parentType: 'REQUEST' });
   if (u.meta) await logActivity({ organizationId: orgId, objectiveId: objective.id, type: 'AI_CALL', actor: 'Mogli', message: `Mogli used ${u.meta.provider}/${u.meta.model} for understand`, meta: u.meta });
   if (u.error) console.error('Hippoturtle understand fell back to founder numbers:', u.error);
   const updated = await db.objective.update({ where: { id: objective.id }, data: { understanding: json(u.understanding), stage: 'UNDERSTAND' } });
@@ -147,7 +147,7 @@ async function loadAristotle(objective: Objective) {
 export async function generatePathways(objective: Objective) {
   const { memo, report, research, facts } = await loadAristotle(objective);
   if (memo.pathways) return memo.pathways as unknown as PathwaysResult;
-  const r = await generateJson<unknown>('pathways', pathwaysPrompt({ objective: objective.text, understanding: objective.understanding as Understanding | null, facts, research, report, company: await companyFor(objective) }), PATHWAYS_SCHEMA);
+  const r = await generateJson<unknown>('pathways', pathwaysPrompt({ objective: objective.text, understanding: objective.understanding as Understanding | null, facts, research, report, company: await companyFor(objective) }), PATHWAYS_SCHEMA, {}, { organizationId: objective.organizationId, objectiveId: objective.id, parentType: 'REQUEST' });
   await logAi(objective.organizationId, objective.id, null, r, 'Aristotle');
   const result = normalisePathways(r.data, { findings: new Set((research?.findings || []).map((f) => f.id)), facts: new Set(facts.map((f) => f.id)) });
   await db.decisionMemo.update({ where: { id: memo.id }, data: { pathways: json(result), founderChecklist: json(result.founderChecklist) } });
@@ -183,7 +183,7 @@ export async function generateWork(objective: Objective) {
   const chosen = (result?.pathways || []).filter((p) => selected.includes(p.id));
   if (!chosen.length) throw new HttpError(409, 'Choose at least one pathway first.');
   const memory = await memoryBrief(objective.organizationId, objective.id);
-  const r = await generateJson<unknown>('plan', planPrompt({ objective: objective.text, understanding: objective.understanding as Understanding | null, pathways: chosen, experiments: report.experiments || [], thirtyDayPlan: report.thirtyDayPlan || [], memory, company: await companyFor(objective) }), PLAN_SCHEMA);
+  const r = await generateJson<unknown>('plan', planPrompt({ objective: objective.text, understanding: objective.understanding as Understanding | null, pathways: chosen, experiments: report.experiments || [], thirtyDayPlan: report.thirtyDayPlan || [], memory, company: await companyFor(objective) }), PLAN_SCHEMA, {}, { organizationId: objective.organizationId, objectiveId: objective.id, parentType: 'REQUEST' });
   await logAi(objective.organizationId, objective.id, null, r, 'Mogli');
   const plan = normalisePlan(r.data);
   if (await db.work.count({ where: { objectiveId: objective.id } })) return db.work.findMany({ where: { objectiveId: objective.id }, orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }] }); // concurrent request won
@@ -207,7 +207,7 @@ export async function prepareBrief(ctx: { work: { id: string; organizationId: st
   const memory = await memoryBrief(objective.organizationId, objective.id);
   const provenance = await provenanceFor(objective);
   const prompt = briefPrompt({ work, cap, objective: objective.text, memory, timeCommitment: ctx.founder.timeCommitment, company: await companyFor(objective), facts: provenance.facts, findings: provenance.findings, classification });
-  const r = await generateJson<unknown>('brief', prompt, BRIEF_SCHEMA);
+  const r = await generateJson<unknown>('brief', prompt, BRIEF_SCHEMA, {}, { organizationId: objective.organizationId, objectiveId: objective.id, workId: work.id, parentType: 'WORK', parentId: work.id });
   await logAi(objective.organizationId, objective.id, work.id, r, 'Mogli');
   const brief = normaliseBrief(r.data, cap, provenance);
   const effort = normaliseEffort(brief.effort as Partial<EffortModel>, cap);
@@ -282,7 +282,7 @@ export async function executeWork(ctx: { work: { id: string; organizationId: str
   try {
     const memory = await memoryBrief(objective.organizationId, objective.id, 60);
     const research = objective.auditId ? (await getResearch(objective.auditId)) as ResearchRecord | null : null;
-    const r = await generateJson<unknown>('execute', executePrompt({ title: work.title, brief, cap, mode, memory, research: research ? researchBrief(research).slice(0, 12_000) : 'none', company: await companyFor(objective), classification }), EXECUTE_SCHEMA);
+    const r = await generateJson<unknown>('execute', executePrompt({ title: work.title, brief, cap, mode, memory, research: research ? researchBrief(research).slice(0, 12_000) : 'none', company: await companyFor(objective), classification }), EXECUTE_SCHEMA, {}, { organizationId: objective.organizationId, objectiveId: objective.id, workId: work.id, parentType: 'WORK', parentId: work.id });
     const out = normaliseOutput(r.data, cap, mode);
     // Every AI-generated deliverable carries an explicit, unconditional AI-generated marker (also re-applied on
     // display/download, so it cannot be lost). It does not replace the structured truth statuses.
@@ -321,7 +321,7 @@ export async function addQuote(ctx: { work: { id: string; organizationId: string
   if (briefRow) {
     try {
       const brief = { deliverable: briefRow.deliverable, successCriteria: briefRow.successCriteria as string[], outOfScope: briefRow.outOfScope as string[] } as BriefData;
-      const r = await generateJson<{ explanation: string; scopeGaps: string[]; extras: string[] }>('compare', comparePrompt({ brief, quote: { provider: q.providerName, amount: q.amount, includes: q.includes, excludes: q.excludes, turnaroundDays: q.turnaroundDays ?? null, revisions: q.revisions ?? null }, pos }), COMPARE_SCHEMA);
+      const r = await generateJson<{ explanation: string; scopeGaps: string[]; extras: string[] }>('compare', comparePrompt({ brief, quote: { provider: q.providerName, amount: q.amount, includes: q.includes, excludes: q.excludes, turnaroundDays: q.turnaroundDays ?? null, revisions: q.revisions ?? null }, pos }), COMPARE_SCHEMA, {}, { organizationId: work.organizationId, objectiveId: objective.id, workId: work.id, parentType: 'WORK', parentId: work.id });
       await logAi(objective.organizationId, objective.id, work.id, r, 'Mogli');
       const list = (v: unknown) => (Array.isArray(v) ? v.map(String).filter(Boolean).slice(0, 6) : []);
       if (typeof r.data.explanation === 'string' && r.data.explanation.trim()) comparison = { ...pos, explanation: r.data.explanation.trim().slice(0, 800), scopeGaps: list(r.data.scopeGaps), extras: list(r.data.extras), explainedBy: 'AI' };

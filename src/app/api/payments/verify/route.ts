@@ -159,6 +159,8 @@ export async function POST(req: Request) {
         // instead of searching again (keeps retries fast and inside the time limit).
         existingResearch: await getResearch(audit.id),
         onResearch: (r) => saveResearch(audit.id, r),
+        // Every Gemini and Tavily call of this audit is metered against the audit and its owner.
+        usage: { userId: audit.userId, auditId: audit.id, parentType: 'AUDIT', parentId: audit.id },
       });
     } catch (error) {
       console.error('Aristotle audit engine failed:', error);

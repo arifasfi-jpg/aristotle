@@ -7,6 +7,7 @@ import type { AuditReport, Sector } from '../audit';
 import { getLockedFacts, getResearch } from '../audit-meta';
 import type { EvidenceClaim, ResearchRecord } from '../evidence';
 import { describeFact, extractFounderFacts, formatFactValue, type FounderFact } from '../founder-facts';
+import type { UsageContext } from '../ai-usage';
 import { aiMeta, generateJson } from './gateway';
 import { isUniqueViolation, logActivity, remember, stableId, upsertSafely } from './context';
 import { advanceTo, identityBlock, NOT_ESTABLISHED, type Understanding } from './types';
@@ -48,9 +49,9 @@ export function understandFromNumbers(text: string): Understanding {
   };
 }
 
-export async function understandObjective(text: string, company: string | null = null): Promise<{ understanding: Understanding; meta?: ReturnType<typeof aiMeta>; error?: string }> {
+export async function understandObjective(text: string, company: string | null = null, usage?: UsageContext): Promise<{ understanding: Understanding; meta?: ReturnType<typeof aiMeta>; error?: string }> {
   try {
-    const r = await generateJson<Omit<Understanding, 'source'>>('understand', understandPrompt(text, company), UNDERSTAND_SCHEMA);
+    const r = await generateJson<Omit<Understanding, 'source'>>('understand', understandPrompt(text, company), UNDERSTAND_SCHEMA, {}, usage);
     const d = r.data;
     const s = (v: unknown, max = 400) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : 'Not stated yet');
     const kind = ['NEW_IDEA', 'EXISTING_BUSINESS', 'UNCLEAR'].includes(d.businessKind) ? d.businessKind : 'UNCLEAR';

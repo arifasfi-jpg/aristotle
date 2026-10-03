@@ -23,3 +23,12 @@ export async function getCurrentUser() {
   if (!session || session.expiresAt < new Date()) return null;
   return session.user;
 }
+
+/** The signed-in (anonymous-cookie) user, or a new anonymous user + session — the same identity Hippoturtle creates for an objective. */
+export async function currentOrGuestUser() {
+  const user = await getCurrentUser();
+  if (user) return user;
+  const created = await db.user.create({ data: {} });
+  await createSession(created.id);
+  return created;
+}

@@ -4,7 +4,8 @@ import { buildFounderFactsBlock, FACT_CONCEPTS, type FounderFact } from './found
 import { validateReport } from './report-validation';
 import type { Scope } from './routing';
 import { validateEvidence, type ResearchRecord } from './evidence';
-import { callGeminiJson } from './gemini';
+import type { UsageContext } from './ai-usage';
+import { aristotleGeminiJson } from './hippo/gateway';
 import { isPlanCheckpoint, researchBusiness, researchBrief } from './research';
 
 // Whole audit must fit the 60s serverless limit of /api/payments/verify (DB work included).
@@ -535,7 +536,7 @@ EVIDENCE RULES
  * `existingResearch`: research already completed for this audit (e.g. a retry after the decision stage
  * failed) is reused instead of searching again. `onResearch` persists research as soon as it exists.
  */
-export async function runAudit(input: AuditInput, opts: { existingResearch?: ResearchRecord | null; onResearch?: (r: ResearchRecord) => Promise<void>; budgetMs?: number } = {}) {
+export async function runAudit(input: AuditInput, opts: { existingResearch?: ResearchRecord | null; onResearch?: (r: ResearchRecord) => Promise<void>; budgetMs?: number; usage?: UsageContext } = {}) {
   const start = Date.now();
   const deadline = start + (opts.budgetMs ?? AUDIT_BUDGET_MS);
   if (!process.env.GEMINI_API_KEY || !process.env.TAVILY_API_KEY) {
@@ -550,7 +551,7 @@ export async function runAudit(input: AuditInput, opts: { existingResearch?: Res
   const reusedResearch = Boolean(research);
   if (!research) {
     const facts = (input.founderFacts || []).filter((f) => f.locked);
-    research = await researchBusiness({ idea: input.idea, sector: input.sector, stage: input.stage, geography: input.geography, founderFactsText: facts.map((f) => `${f.id}: ${f.concept} ${f.timeframe} ${f.raw}`).join('\n') }, deadline, undefined, { plan: checkpoint, onPlan: opts.onResearch });
+    research = await researchBusiness({ idea: input.idea, sector: input.sector, stage: input.stage, geography: input.geography, founderFactsText: facts.map((f) => `${f.id}: ${f.concept} ${f.timeframe} ${f.raw}`).join('\n') }, deadline, undefined, { plan: checkpoint, onPlan: opts.onResearch, usage: opts.usage });
     if (opts.onResearch) await opts.onResearch(research);
   }
   const answered = (research.questions || []).filter((q) => q.status === 'ANSWERED' || q.status === 'PARTIAL').length;
@@ -561,7 +562,7 @@ export async function runAudit(input: AuditInput, opts: { existingResearch?: Res
   if (decideTimeout < MIN_DECIDE_MS) {
     throw new Error('AUDIT_TIME_BUDGET_EXCEEDED: research is saved; retry to complete the decision memo');
   }
-  const decision = await callGeminiJson<AuditReport>({ label: 'decision', prompt: buildPrompt(input, researchBrief(research)), schema: AUDIT_RESPONSE_SCHEMA, maxOutputTokens: 12000, timeoutMs: decideTimeout });
+  const decision = await aristotleGeminiJson<AuditReport>('decision', { label: 'decision', prompt: buildPrompt(input, researchBrief(research)), schema: AUDIT_RESPONSE_SCHEMA, maxOutputTokens: 12000, timeoutMs: decideTimeout }, opts.usage);
 
   // Prompting alone is not trusted: founder facts, numbers, citations, assumptions and regulation are enforced here.
   const { report: numbersChecked, log } = validateReport(decision.data, input.founderFacts);

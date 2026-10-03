@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import { requireWork } from '@/lib/hippo/context';
+import { HttpError, requireWork } from '@/lib/hippo/context';
+import { guardUser } from '@/lib/rate-limit';
 import { handle } from '@/lib/hippo/http';
 import { addQuote } from '@/lib/hippo/service';
 
@@ -17,6 +18,9 @@ const schema = z.object({
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   return handle('add quote', async () => {
     const ctx = await requireWork((await params).id);
+    // Each quote triggers an AI comparison: bounded per user.
+    const u = await guardUser(ctx.user.id, 'quote');
+    if (!u.ok) throw new HttpError(u.status, u.error);
     const b = schema.parse(await req.json());
     // Founders can only record EXTERNAL_OPTION providers themselves; partner tiers are created by Hippoturtle onboarding.
     const r = await addQuote(ctx, { ...b, tier: 'EXTERNAL_OPTION', source: b.example ? 'EXAMPLE' : 'FOUNDER_ENTERED' });

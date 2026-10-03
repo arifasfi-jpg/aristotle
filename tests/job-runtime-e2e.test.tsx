@@ -2,7 +2,7 @@
 // only Gemini/Tavily HTTP and the cookie jar are faked. Tests A–Z plus the two critical tests (worker death mid-audit,
 // four concurrent workers on one finite budget). Skipped without the HIPPO_E2E_* database env.
 import { escalationKind, escalationReply } from './helpers/escalation-fakes';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const E2E = Boolean(process.env.HIPPO_E2E_DATABASE_URL && process.env.HIPPO_E2E_PRISMA_CLIENT && process.env.HIPPO_E2E_ADAPTER);
 vi.mock('@/lib/db', async () => {
@@ -13,6 +13,9 @@ vi.mock('@/lib/db', async () => {
 });
 let jar = new Map<string, string>();
 vi.mock('next/headers', () => ({ cookies: async () => ({ get: (n: string) => (jar.has(n) ? { name: n, value: jar.get(n)! } : undefined), set: (n: string, v: string) => { jar.set(n, v); } }) }));
+// Pages are rendered in the polling tests below.
+vi.mock('next/link', () => ({ default: ({ href, children, ...p }: { href: string; children: React.ReactNode }) => <a href={href} {...p}>{children}</a> }));
+vi.mock('next/navigation', () => ({ notFound: () => { throw new Error('NOT_FOUND'); }, redirect: (u: string) => { throw new Error(`REDIRECT ${u}`); }, useRouter: () => ({ refresh() {}, push() {} }) }));
 const razorpay = { constructed: 0 };
 vi.mock('razorpay', () => ({ default: class { constructor() { razorpay.constructed++; } orders = { create: async () => ({}), fetch: async () => ({}), fetchPayments: async () => ({ items: [] }) }; } }));
 
@@ -408,3 +411,97 @@ describe.skipIf(!E2E)('Durable job runtime (real Postgres)', () => {
     expect(await jobs.runJob(queued.id)).toMatchObject({ status: 'NOT_CLAIMED' });
   });
 });
+
+// Multi-window audits (escalation + pathways need several worker windows) must finish without Cron: Vercel Cron never
+// runs on Preview, so the founder's own polling continues a job that yielded between steps.
+describe.skipIf(!E2E)('Polling continues yielded jobs; the UI follows the job, not timestamps (real Postgres)', () => {
+  beforeEach(async () => {
+    const { clearPriceCache, clearSpendCache } = await import('@/lib/ai-usage');
+    clearPriceCache(); clearSpendCache();
+    tavilyHang = false; engineGate = null; geminiDelayMs = 0; geminiFail = null;
+  });
+  afterEach(() => { delete process.env.HIPPO_WORKER_BUDGET_MS; });
+  const jobOf = async (db: any, auditId: string) => db.job.findUnique({ where: { dedupeKey: `ARISTOTLE_AUDIT:${auditId}` } }); // eslint-disable-line @typescript-eslint/no-explicit-any
+
+  it('REGRESSION: a yielded audit is continued by status polls (atomic, from its checkpoints, within budget) until complete', async () => {
+    const { db, jobs } = await mods();
+    // Verify's window is too short for the pathways step (42s): the job parks at DECIDED — exactly the 33eea91 Preview run.
+    process.env.HIPPO_WORKER_BUDGET_MS = '40000';
+    const auditId = await payableAudit();
+    const before = calls.length;
+    expect((await (await verifyRoute())(post({ auditId, demo: true }))).status).toBe(200);
+    await jobs.settleDetached();
+    expect(await jobOf(db, auditId)).toMatchObject({ status: 'QUEUED', checkpoint: 'DECIDED', lastError: null }); // yielded, not failed — and no Cron exists
+    delete process.env.HIPPO_WORKER_BUDGET_MS; // later invocations get the normal 55s window
+    const { GET: status } = await import('@/app/api/jobs/[id]/route');
+    const jobId = (await jobOf(db, auditId)).id;
+    let polls = 0;
+    for (; polls < 20 && (await jobOf(db, auditId)).status !== 'COMPLETED'; polls++) {
+      // Three concurrent polls (tabs / refresh): the atomic claim lets at most one run proceed.
+      const res = await Promise.all([1, 2, 3].map(() => status(new Request('http://x'), ctx(jobId))));
+      expect(res.every((r) => r.status === 200)).toBe(true);
+      await jobs.settleDetached();
+    }
+    expect(polls).toBeGreaterThanOrEqual(1);
+    expect(await jobOf(db, auditId)).toMatchObject({ status: 'COMPLETED', attempts: 0 });
+    const a = await db.audit.findUnique({ where: { id: auditId } });
+    expect(a.status).toBe('completed');
+    expect(JSON.parse(a.report).pathways.pathways).toHaveLength(3);
+    // Checkpoints held: every stage ran exactly once despite many windows and concurrent polls.
+    const made = calls.slice(before);
+    expect(['plan', 'decision', 'pathways', 'escalate', 'gap'].map((k) => made.filter((c) => c === k).length)).toEqual([1, 1, 1, 1, 1]);
+    expect(await db.costReservation.count({ where: { scopeType: 'AUDIT', scopeId: auditId, releasedAt: null } })).toBe(0);
+    expect((await jobOf(db, auditId)).costInr).toBeLessThanOrEqual(76);
+  }, 30_000);
+
+  it('REGRESSION: a QUEUED or RUNNING audit is never shown as "could not be completed", however old; FAILED / WAITING / CANCELLED are', async () => {
+    const { db, jobs } = await mods();
+    process.env.HIPPO_WORKER_BUDGET_MS = '40000';
+    const auditId = await payableAudit();
+    await (await verifyRoute())(post({ auditId, demo: true }));
+    await jobs.settleDetached();
+    delete process.env.HIPPO_WORKER_BUDGET_MS;
+    const job = await jobOf(db, auditId);
+    // Parked between steps with the next run not yet due (so this render shows state without continuing it), and an
+    // audit row untouched for 10 minutes — exactly what the old 3-minute heuristic reported as a failure.
+    await db.job.update({ where: { id: job.id }, data: { runAfter: new Date(Date.now() + 10 * 60_000) } });
+    await db.audit.update({ where: { id: auditId }, data: { updatedAt: new Date(Date.now() - 10 * 60_000) } });
+    const objective = await db.objective.findFirst({ where: { auditId } });
+    const { default: ObjectivePage } = await import('@/app/objectives/[id]/page');
+    const { default: AuditPage } = await import('@/app/audit/[id]/page');
+    const { renderToStaticMarkup } = await import('react-dom/server');
+    const objectivePage = async () => renderToStaticMarkup(await ObjectivePage({ params: Promise.resolve({ id: objective.id }) }));
+    const auditPage = async () => renderToStaticMarkup(await AuditPage({ params: Promise.resolve({ id: auditId }) }));
+    for (const status of ['QUEUED', 'RUNNING']) {
+      await db.job.update({ where: { id: job.id }, data: { status, leaseUntil: new Date(Date.now() + 60_000) } });
+      const html = await objectivePage();
+      expect([status, html.includes('Analysis could not be completed')]).toEqual([status, false]);
+      expect(html).toContain('Venture intelligence'); // the researching state
+      expect(await auditPage()).toContain('Audit processing');
+    }
+    for (const status of ['FAILED', 'WAITING', 'CANCELLED']) {
+      await db.job.update({ where: { id: job.id }, data: { status, leaseUntil: null } });
+      expect([status, (await objectivePage()).includes('Analysis could not be completed')]).toEqual([status, true]);
+      expect(await auditPage()).toContain('Analysis not finished yet');
+    }
+  }, 30_000);
+
+  it('the objective page itself continues a due job (no Cron, no status route needed)', async () => {
+    const { db, jobs } = await mods();
+    process.env.HIPPO_WORKER_BUDGET_MS = '40000';
+    const auditId = await payableAudit();
+    await (await verifyRoute())(post({ auditId, demo: true }));
+    await jobs.settleDetached();
+    delete process.env.HIPPO_WORKER_BUDGET_MS;
+    expect(await jobOf(db, auditId)).toMatchObject({ status: 'QUEUED', checkpoint: 'DECIDED' });
+    const objective = await db.objective.findFirst({ where: { auditId } });
+    const { default: ObjectivePage } = await import('@/app/objectives/[id]/page');
+    const checkpoint = (await jobOf(db, auditId)).checkpoint;
+    await ObjectivePage({ params: Promise.resolve({ id: objective.id }) });
+    await jobs.settleDetached();
+    expect(checkpoint).toBe('DECIDED');
+    expect(await jobOf(db, auditId)).toMatchObject({ status: 'COMPLETED', checkpoint: 'PATHWAYS' }); // finished by the page poll
+    expect((await db.audit.findUnique({ where: { id: auditId } })).status).toBe('completed');
+  }, 30_000);
+});
+

@@ -212,8 +212,8 @@ const detached = new Set<Promise<unknown>>();
  * the route's maxDuration). Outside a request (scripts, tests) it runs detached. Never awaited by the request: payment
  * verification returns as soon as the job is durable. If this run dies, the lease expires and a later trigger resumes.
  */
-export async function kickJob(id: string, startedAt = Date.now()) {
-  const run = () => runJob(id, { deadline: startedAt + workerBudgetMs() }).catch((e) => console.error(JSON.stringify({ event: 'job_kick_failed', jobId: id, error: String(e) })));
+export async function kickJob(id: string, startedAt = Date.now(), budgetMs = workerBudgetMs()) {
+  const run = () => runJob(id, { deadline: startedAt + Math.min(workerBudgetMs(), budgetMs) }).catch((e) => console.error(JSON.stringify({ event: 'job_kick_failed', jobId: id, error: String(e) })));
   try {
     const { after } = await import('next/server');
     after(run);
@@ -223,6 +223,22 @@ export async function kickJob(id: string, startedAt = Date.now()) {
     void p.finally(() => detached.delete(p));
   }
 }
+/** Due to run now: queued with runAfter passed, or running with an expired lease (its worker died). */
+export const isDue = (job: Pick<Job, 'status' | 'runAfter' | 'leaseUntil'>, now = new Date()) =>
+  (job.status === 'QUEUED' && job.runAfter <= now) || (job.status === 'RUNNING' && Boolean(job.leaseUntil) && job.leaseUntil! < now);
+
+/**
+ * Continues a job that yielded between steps (or whose worker died) from a request the owner is already making — the
+ * page / status poll — so multi-window jobs finish without Cron (Vercel Cron never runs on Preview). Safe to call on
+ * every poll: claimJob is an atomic compare-and-set, so at most one run proceeds; it resumes from the durable
+ * checkpoint and runJob enforces the cost limit before every step. `budgetMs` must fit the calling route's maxDuration.
+ */
+export async function resumeIfDue(job: Pick<Job, 'id' | 'status' | 'runAfter' | 'leaseUntil'> | null, budgetMs: number): Promise<boolean> {
+  if (!job || !isDue(job)) return false;
+  await kickJob(job.id, Date.now(), budgetMs);
+  return true;
+}
+
 /** Waits for detached runs (tests and scripts only). */
 export async function settleDetached() { while (detached.size) await Promise.allSettled([...detached]); }
 

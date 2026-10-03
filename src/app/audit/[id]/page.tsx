@@ -4,6 +4,8 @@ import { db } from '@/lib/db';
 import { getCurrentUser } from '@/lib/session';
 import type { AuditReport } from '@/lib/audit';
 import RetryAnalysis from '@/components/RetryAnalysis';
+import { AutoRefresh } from '@/components/hippo/Status';
+import { auditJobState } from '@/lib/jobs';
 import { getLockedFacts, getResearch, getScopeRecord } from '@/lib/audit-meta';
 import { evidenceSummary, type EvidenceClaim, type DecisionMemo, type UnknownMetric } from '@/lib/evidence';
 import { gapExplanation } from '@/lib/research';
@@ -23,6 +25,8 @@ const CLAIM_STYLE:Record<string,string>={FACT:'border-[#2c6b57] text-[#77e2c1]',
 const CLAIM_LABEL:Record<string,string>={FACT:'Sourced fact',FOUNDER:'Founder-stated',CALCULATION:'Calculation',ASSUMPTION:'Assumption',HYPOTHESIS:'Hypothesis',INFERENCE:'Inference'};
 const PROV_STYLE:Record<string,string>={FOUNDER_STATED:'border-[#2c6b57] text-[#77e2c1]',CALCULATED:'border-[#2d4a6b] text-[#8fb8ff]',EXTERNAL:'border-[#5a4a2d] text-[#ffcf70]',ASSUMPTION:'border-[#3a4657] text-[#93a0b5]',HYPOTHESIS:'border-[#5a2d4a] text-[#ff9fd0]'};
 
+// 60s: a poll of this page may continue the audit job for one bounded worker window (see auditJobState).
+export const maxDuration = 60;
 export default async function AuditPage({params}:{params:Promise<{id:string}>}){
  const {id}=await params; const user=await getCurrentUser();
  if(!user)return <main className="mx-auto max-w-4xl px-6 py-20"><h1 className="text-3xl font-semibold">Session required</h1><p className="mt-3 text-[#93a0b5]">Open this audit in the same browser session used to submit it.</p></main>;
@@ -30,10 +34,13 @@ export default async function AuditPage({params}:{params:Promise<{id:string}>}){
  if(audit.status==='out_of_scope')return <main className="mx-auto max-w-4xl px-6 py-20"><h1 className="text-3xl font-semibold">Outside Aristotle's audit scope</h1><p className="mt-3 text-[#93a0b5]">{OUT_OF_SCOPE_MESSAGES.default} You have not been charged.</p></main>;
  // Never show a report unless this audit was paid AND generation finished.
  if(audit.status!=='completed'||audit.paymentStatus!=='paid'||audit.report==='{}'){
-  const stale=audit.status==='generating'&&Date.now()-new Date(audit.updatedAt).getTime()>3*60*1000;
   const paid=audit.paymentStatus==='paid';
+  // The job decides (QUEUED / RUNNING = still working, continued from this poll when due); age only for legacy audits.
+  const jobState=paid?await auditJobState(audit.id,{resume:true}):null;
+  const stale=jobState?.job?jobState.stopped:audit.status==='generating'&&Date.now()-new Date(audit.updatedAt).getTime()>3*60*1000;
   const orderPending=!paid&&!!audit.paymentRef&&audit.paymentRef.startsWith('order_');
   const shell=(title:string,text:string,retry?:string)=><main className="mx-auto max-w-4xl px-6 py-20"><h1 className="text-3xl font-semibold">{title}</h1><p className="mt-3 text-[#93a0b5]">{text}</p>{retry&&<RetryAnalysis auditId={audit.id} label={retry}/>}</main>;
+  if(paid&&jobState?.running)return <><AutoRefresh/>{shell('Audit processing','Aristotle is still researching and writing your analysis. This page updates automatically.')}</>;
   if(paid&&(audit.status==='failed'||stale||audit.status==='completed'))return shell('Analysis not finished yet','Your payment was successful, but Aristotle could not complete the analysis yet.','Retry Analysis');
   if(paid)return shell('Audit processing','Aristotle is generating your analysis. This usually takes under a minute; refresh this page shortly.');
   if(orderPending)return shell('Waiting for payment confirmation','If you completed the ₹99 payment, Aristotle can check it with Razorpay and continue. You will not be charged again.','Check payment & continue');

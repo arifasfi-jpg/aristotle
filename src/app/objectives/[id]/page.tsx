@@ -10,6 +10,7 @@ import { HttpError, requireObjective } from '@/lib/hippo/context';
 import { companyFor, refreshObjective } from '@/lib/hippo/service';
 import type { PathwaysResult, Understanding } from '@/lib/hippo/types';
 import { isDemoMode } from '@/lib/payments';
+import { auditJobState } from '@/lib/jobs';
 import DecisionMemoView from '@/components/hippo/DecisionMemoView';
 import PathwaysPanel from '@/components/hippo/PathwaysPanel';
 import ResearchLauncher, { Researching } from '@/components/hippo/ResearchLauncher';
@@ -19,7 +20,8 @@ import { Stepper, WorkCard } from '@/components/hippo/Workflow';
 import { Badge, Card, Eyebrow, Shell, day } from '@/components/hippo/ui';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 30;
+// 60s: a poll of this page may continue the audit job for one bounded worker window (see auditJobState).
+export const maxDuration = 60;
 
 const Q_TONE: Record<string, ['green' | 'amber' | 'red' | 'grey', string]> = { ANSWERED: ['green', 'Answered'], PARTIAL: ['amber', 'Partly answered'], ANALOGOUS: ['amber', 'Analogues only'], NOT_FOUND: ['grey', 'Not established'], CONTRADICTORY: ['red', 'Contradictory'], SEARCH_FAILED: ['grey', 'Searches failed'] };
 
@@ -43,11 +45,15 @@ export default async function ObjectivePage({ params }: { params: Promise<{ id: 
 
   if (!memo) {
     const paid = audit?.paymentStatus === 'paid';
-    const stale = audit?.status === 'generating' && Date.now() - new Date(audit.updatedAt).getTime() > 3 * 60_000;
+    // The job decides: QUEUED / RUNNING is still working (and is continued from this poll when due); only FAILED /
+    // WAITING / CANCELLED has stopped. The age heuristic remains only for legacy audits that have no job.
+    const jobState = audit && paid ? await auditJobState(audit.id, { resume: true }) : null;
+    const stale = jobState?.job ? jobState.stopped : audit?.status === 'generating' && Date.now() - new Date(audit.updatedAt).getTime() > 3 * 60_000;
+    const working = Boolean(jobState?.running) || (audit?.status === 'generating' && !stale);
     let body: React.ReactNode;
     if (!audit) body = <Card><p className="text-sm">This objective has no analysis attached yet.</p></Card>;
     else if (audit.status === 'out_of_scope') body = <Card><p className="text-sm leading-6">This request is outside what Aristotle analyses, so you have not been charged.</p></Card>;
-    else if (paid && audit.status === 'generating' && !stale) body = <><AutoRefresh /><Researching /></>;
+    else if (paid && working) body = <><AutoRefresh /><Researching /></>;
     else if (paid) body = <Card><div className="flex items-start gap-3"><TriangleAlert className="mt-0.5 shrink-0 text-[#D9670A]"/><div><h2 className="text-lg font-extrabold">Analysis could not be completed.</h2><p className="mt-1 text-sm leading-6 text-[#5B6478]">Your objective is saved and your payment was successful. Any research already completed is kept.</p><div className="mt-4"><RetryAristotle auditId={audit.id} /></div></div></div></Card>;
     else if (audit.paymentRef?.startsWith('order_')) body = <Card><h2 className="text-lg font-extrabold">Waiting for payment confirmation</h2><p className="mt-1 text-sm text-[#5B6478]">If you completed the payment, Hippoturtle can check with Razorpay and continue.</p><div className="mt-4"><RetryAristotle auditId={audit.id} label="CHECK PAYMENT & CONTINUE" /></div></Card>;
     else body = <ResearchLauncher objectiveId={objective.id} auditId={audit.id} demoCheckout={isDemoMode()} />;

@@ -22,7 +22,7 @@ import { normalisePathways, pathwayRefs, PATHWAYS_SCHEMA, pathwaysPrompt } from 
 import type { PathwaysResult, Understanding } from '../hippo/types';
 import type { Scope } from '../routing';
 import type { ResearchRecord } from '../evidence';
-import { enqueueJob, kickJob, registerJobHandler, renewLease, requeueJob, type JobHandler, type StepResult } from './runtime';
+import { dedupeKeyOf, enqueueJob, kickJob, registerJobHandler, renewLease, requeueJob, resumeIfDue, type JobHandler, type StepResult } from './runtime';
 
 export const AUDIT_JOB = 'ARISTOTLE_AUDIT';
 
@@ -169,4 +169,20 @@ export async function startAuditJob(audit: { id: string; userId: string; pricePa
   if (job.status === 'QUEUED') await db.job.updateMany({ where: { id: job.id, status: 'QUEUED' }, data: { runAfter: new Date() } });
   await kickJob(job.id, startedAt);
   return (await db.job.findUnique({ where: { id: job.id } }))!;
+}
+
+/** Work budget for a run resumed from a page / status poll (those routes declare maxDuration = 60). */
+export const POLL_RESUME_MS = 55_000;
+
+/**
+ * What a page should show for a paid audit, from its job — not from timestamps: QUEUED / RUNNING is still working
+ * (a job yields between steps by design); only FAILED / WAITING / CANCELLED is stopped. When `resume` is set, a due job
+ * is continued from this request. `job: null` = a legacy audit with no job.
+ */
+export async function auditJobState(auditId: string, opts: { resume?: boolean } = {}) {
+  const job = await db.job.findUnique({ where: { dedupeKey: dedupeKeyOf(AUDIT_JOB, auditId) } });
+  const running = job?.status === 'QUEUED' || job?.status === 'RUNNING';
+  const stopped = job?.status === 'FAILED' || job?.status === 'WAITING' || job?.status === 'CANCELLED';
+  const resumed = opts.resume && running ? await resumeIfDue(job, POLL_RESUME_MS) : false;
+  return { job, running, stopped, resumed };
 }

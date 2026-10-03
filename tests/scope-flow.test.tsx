@@ -59,6 +59,8 @@ vi.mock('razorpay', () => ({ default: class { orders = {
   fetchPayments: async (id: string) => ({ items: rzOrders.get(id)?.status === 'paid' ? [{ id: 'pay_reconciled1', status: 'captured' }] : [] }),
 }; } }));
 vi.mock('next/link', () => ({ default: ({ href, children, ...p }: any) => <a href={href} {...p}>{children}</a> }));
+// The audit page auto-refreshes while its job is still working (a client component using the router).
+vi.mock('next/navigation', async (orig) => ({ ...(await orig<typeof import('next/navigation')>()), useRouter: () => ({ refresh() {}, push() {} }) }));
 const runAudit = vi.fn(async (input: Row) => {
   const { deterministicAudit } = await import('@/lib/audit');
   const { validateReport } = await import('@/lib/report-validation');
@@ -347,6 +349,12 @@ describe('Razorpay TEST/LIVE flow and recovery', () => {
     runAudit.mockImplementationOnce(async () => { throw new Error('TAVILY_TIMEOUT'); });
     // Phase 2 (intentional): 200 once the payment is verified and the job is durable; the failure is on the page.
     expect((await call(verify(post({ auditId: id, razorpay_order_id: o.orderId, razorpay_payment_id: 'pay_9', razorpay_signature: sign(o.orderId, 'pay_9') })))).status).toBe(200);
+    // A transient failure leaves the job QUEUED for its automatic retry: still working, never shown as failed.
+    const job = [...db.jobs.values()].find((j) => j.subjectId === id)!;
+    expect(job).toMatchObject({ status: 'QUEUED', attempts: 1 });
+    expect(await page(id)).toContain('Audit processing');
+    // Only a stopped job (retries exhausted → FAILED) shows the founder Retry.
+    Object.assign(job, { status: 'FAILED' });
     const html = await page(id);
     expect(html).toContain('Your payment was successful, but Aristotle could not complete the analysis yet.');
     expect(html).toContain('Retry Analysis');

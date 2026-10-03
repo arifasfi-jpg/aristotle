@@ -52,6 +52,8 @@ describe('Router: every task has a purpose and a tier; models are configuration'
       // Phase 3A (intentional): the Hippo conversation is the first CONVERSATION task.
       converse: 'CONVERSATION',
       understand: 'ARISTOTLE', 'scope-classifier': 'ARISTOTLE', explore: 'OPPORTUNITY', 'research-plan': 'RESEARCH', 'research-extract': 'RESEARCH', 'research-search': 'RESEARCH',
+      // Research escalation (intentional): follow-up queries and gap explanations are research spend, never free.
+      'research-escalate': 'RESEARCH', 'research-gap': 'RESEARCH',
       decision: 'ARISTOTLE', pathways: 'ARISTOTLE', plan: 'WORK', brief: 'WORK', execute: 'WORK', compare: 'WORK',
     });
     expect(FREE_TASKS.sort()).toEqual(['converse', 'explore', 'scope-classifier', 'understand']); // reachable before any payment
@@ -82,7 +84,9 @@ describe('No unmetered provider calls anywhere in the app', () => {
   it('the search provider is only called inside the metered search wrapper', () => {
     expect(offenders(/api\.tavily\.com/, ['src/lib/research.ts'])).toEqual([]);
     const research = fs.readFileSync(path.join(__dirname, '../src/lib/research.ts'), 'utf8');
-    expect(research).toMatch(/return meteredSearch\(\{ provider: 'tavily', depth: 'advanced' \}, opts\.usage, \(\) => tavilyRequest\(/);
+    // Credits are metered at the same depth the request is sent with (advanced by default; escalation may use basic).
+    expect(research).toMatch(/return meteredSearch\(\{ provider: 'tavily', depth: opts\.depth \?\? 'advanced' \}, opts\.usage, \(\) => tavilyRequest\(/);
+    expect(research).toMatch(/search_depth: opts\.depth \?\? 'advanced',/);
     expect((research.match(/tavilyRequest\(/g) || []).length).toBe(2); // the definition + the single metered call
   });
   it('no legacy engine copies remain', () => {

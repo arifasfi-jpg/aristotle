@@ -5,6 +5,7 @@ import { db } from '@/lib/db';
 import type { AuditReport } from '@/lib/audit';
 import { getLockedFacts, getResearch } from '@/lib/audit-meta';
 import type { ResearchRecord } from '@/lib/evidence';
+import { gapExplanation } from '@/lib/research';
 import { HttpError, requireObjective } from '@/lib/hippo/context';
 import { companyFor, refreshObjective } from '@/lib/hippo/service';
 import type { PathwaysResult, Understanding } from '@/lib/hippo/types';
@@ -20,7 +21,7 @@ import { Badge, Card, Eyebrow, Shell, day } from '@/components/hippo/ui';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 30;
 
-const Q_TONE: Record<string, ['green' | 'amber' | 'red' | 'grey', string]> = { ANSWERED: ['green', 'Answered'], PARTIAL: ['amber', 'Partly answered'], NOT_FOUND: ['grey', 'No evidence found'], CONTRADICTORY: ['red', 'Contradictory'], SEARCH_FAILED: ['grey', 'Search failed'] };
+const Q_TONE: Record<string, ['green' | 'amber' | 'red' | 'grey', string]> = { ANSWERED: ['green', 'Answered'], PARTIAL: ['amber', 'Partly answered'], ANALOGOUS: ['amber', 'Analogues only'], NOT_FOUND: ['grey', 'Not established'], CONTRADICTORY: ['red', 'Contradictory'], SEARCH_FAILED: ['grey', 'Searches failed'] };
 
 export default async function ObjectivePage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -62,6 +63,9 @@ export default async function ObjectivePage({ params }: { params: Promise<{ id: 
     db.work.findMany({ where: { objectiveId: objective.id }, orderBy: [{ priority: 'asc' }, { createdAt: 'asc' }] }),
   ]);
   const pathways = memo.pathways as unknown as PathwaysResult | null;
+  // research.json carries what the tables do not: every search made, evidence type, and the explained gaps.
+  const rq = new Map((research?.questions || []).map((q) => [q.id, q]));
+  const rf = new Map((research?.findings || []).map((f) => [f.id, f]));
   const selected = (Array.isArray(objective.selectedPathways) ? objective.selectedPathways : []) as string[];
   const headline = work.length ? `I've understood the opportunity. There are ${work.length} important pieces of work between here and your first validation milestone. I've converted them into work packages.` : '';
 
@@ -75,9 +79,10 @@ export default async function ObjectivePage({ params }: { params: Promise<{ id: 
         <div className="mt-5 grid gap-3 md:grid-cols-2">{questions.length ? questions.map((q) => { const [tone, label] = Q_TONE[q.status] || Q_TONE.NOT_FOUND; const fs = findings.filter((f) => f.questionCode === q.code); return <div key={q.id} className="ht-card p-5">
           <div className="flex items-center justify-between gap-2"><span className="text-xs font-bold text-[#C9BFAE]">{q.code} · {q.category.replace('_', ' ').toLowerCase()}</span><Badge tone={tone}>{label}</Badge></div>
           <div className="mt-2 font-bold">{q.question}</div>
-          <div className="mt-1 text-xs text-[#6B7389]">Searched: “{q.query}”</div>
-          {fs.length ? <ul className="mt-3 space-y-2">{fs.map((f) => <li key={f.id} className="rounded-xl bg-[#F4FAF6] p-3 text-sm"><div className="font-semibold">{f.statement}</div><div className="mt-1 text-xs text-[#5B6478]">“{f.quote}”</div><div className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-[#6B7389]"><a href={f.sourceUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 underline">{f.sourceTitle}<ExternalLink size={11}/></a><span>Retrieved {f.retrievedAt ? day(f.retrievedAt) : '—'}</span><span>{f.geography}</span><span>Confidence {f.confidence.toLowerCase()}</span></div></li>)}</ul>
-            : <p className="mt-3 text-sm italic text-[#8A6A3B]">No evidence found — this is an open question, not a fact.</p>}
+          <div className="mt-1 text-xs text-[#6B7389]">{rq.get(q.code)?.attempts?.length ? `${rq.get(q.code)!.attempts!.length} searches, widening from “${q.query}”` : `Searched: “${q.query}”`}</div>
+          {fs.length ? <ul className="mt-3 space-y-2">{fs.map((f) => <li key={f.id} className="rounded-xl bg-[#F4FAF6] p-3 text-sm"><div className="font-semibold">{f.statement}</div><div className="mt-1 text-xs text-[#5B6478]">“{f.quote}”</div><div className="mt-1 flex flex-wrap gap-x-3 text-[11px] text-[#6B7389]"><a href={f.sourceUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 underline">{f.sourceTitle}<ExternalLink size={11}/></a><span>Retrieved {f.retrievedAt ? day(f.retrievedAt) : '—'}</span><span>{f.geography}</span>{rf.get(f.code)?.sourceDate && <span>Source date {rf.get(f.code)!.sourceDate}</span>}<span>Confidence {f.confidence.toLowerCase()}</span>{rf.get(f.code)?.evidenceType === 'ANALOGOUS' && <span className="font-semibold text-[#6D28D9]">Analogue{rf.get(f.code)!.analogy ? `: ${rf.get(f.code)!.analogy}` : ''}</span>}</div></li>)}</ul> : null}
+          {(() => { const rqq = rq.get(q.code); const g = rqq && research ? gapExplanation(rqq, research) : null; if (!g) return fs.length ? null : <p className="mt-3 text-sm italic text-[#8A6A3B]">Not yet established — this is an open question, not a fact.</p>;
+            return <div className="mt-3 rounded-xl bg-[#FBF7EF] p-3 text-sm leading-6"><p><span className="font-semibold">{g.lead}</span> {g.checked}</p>{g.closest && <p className="mt-1"><span className="font-semibold">Closest evidence: </span>{g.closest}{g.closestIds.length ? ` [${g.closestIds.join(', ')}]` : ''}</p>}{g.implication && <p className="mt-1"><span className="font-semibold">What it implies (inference): </span>{g.implication}</p>}{g.resolve && <p className="mt-1"><span className="font-semibold">Cheapest way to find out — </span>{g.resolve}</p>}</div>; })()}
         </div>; }) : <Card><p className="text-sm italic text-[#8A6A3B]">This analysis has no structured research questions.</p></Card>}</div>
       </section>
 

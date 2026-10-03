@@ -9,7 +9,7 @@ import { callGeminiJson, cleanJson, geminiModel, type GeminiResult } from '../ge
 export type AiProvider = 'gemini' | 'openai' | 'anthropic';
 export type AiTask = 'understand' | 'pathways' | 'plan' | 'brief' | 'execute' | 'compare' | 'explore' | 'converse';
 /** Aristotle engine calls (always Gemini: its prompts rely on Gemini response schemas and thinking settings). */
-export type AristotleTask = 'research-plan' | 'research-extract' | 'decision' | 'scope-classifier';
+export type AristotleTask = 'research-plan' | 'research-extract' | 'research-escalate' | 'research-gap' | 'decision' | 'scope-classifier';
 
 /**
  * Purpose + tier per task. Purpose separates spend by product area in the ledger; tier is the reasoning level the task
@@ -23,6 +23,8 @@ export const TASK_ROUTE: Record<AiTask | AristotleTask | 'research-search', { pu
   explore: { purpose: 'OPPORTUNITY', tier: 1, free: true },
   'research-plan': { purpose: 'RESEARCH', tier: 1 },
   'research-extract': { purpose: 'RESEARCH', tier: 0 },
+  'research-escalate': { purpose: 'RESEARCH', tier: 1 }, // follow-up queries for questions the first search did not settle
+  'research-gap': { purpose: 'RESEARCH', tier: 1 },      // what remains unknown after escalation, and how to find out
   'research-search': { purpose: 'RESEARCH', tier: 0 },
   decision: { purpose: 'ARISTOTLE', tier: 2 },
   pathways: { purpose: 'ARISTOTLE', tier: 2 },

@@ -1,6 +1,7 @@
 // Phase 3A on REAL PostgreSQL: the Hippo conversation through the real route, real gateway / ledger / free-tier cap,
 // real handoff into the existing objective → Aristotle audit → job pipeline. Only Gemini/Tavily HTTP and the cookie jar
 // are faked. Skipped without the HIPPO_E2E_* database env.
+import { escalationKind, escalationReply } from './helpers/escalation-fakes';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 const E2E = Boolean(process.env.HIPPO_E2E_DATABASE_URL && process.env.HIPPO_E2E_PRISMA_CLIENT && process.env.HIPPO_E2E_ADAPTER);
@@ -43,6 +44,7 @@ beforeAll(() => {
     else if (prompt.includes('Classify this request for Aristotle')) { calls.push('classify'); data = { scope: 'GROWTH_PLAN', confidence: 0.9, reason: 'Existing sales' }; }
     else if (prompt.includes('research planner')) { calls.push('plan'); data = PLAN; }
     else if (prompt.includes('You extract evidence')) { calls.push('extract'); data = prompt.includes('Question 1:') ? { status: 'ANSWERED', findings: [{ statement: 'Chemists are the main purchase point.', sourceId: 'S1', quote: 'Retail chemists remain the main point of purchase', confidence: 'MEDIUM' }] } : { status: 'NOT_FOUND', findings: [] }; }
+    else if (escalationKind(prompt)) { calls.push(escalationKind(prompt)!); data = escalationReply(prompt); } // research escalation + pathways
     else { calls.push('decision'); const { deterministicAudit } = await import('@/lib/audit'); data = { ...deterministicAudit({ idea: 'Glucometers', sector: 'Healthtech' }), unitEconomics: [] }; }
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(data) }] } }], usageMetadata: { promptTokenCount: 800, candidatesTokenCount: 150 } }), { status: 200 });
   }));
@@ -129,6 +131,11 @@ describe.skipIf(!E2E)('Hippo conversation (real Postgres)', () => {
     const results = after.messages.filter((m: Row) => m.kind === 'RESULT');
     expect(results).toHaveLength(1);
     expect(results[0].text).toMatch(/^The research is back\. Short version:/);
+    // Hippo summarises coverage honestly instead of repeating "no evidence found", and mentions the pathways.
+    expect(results[0].text).toMatch(/I looked into \d+ questions: \d+ of \d+ questions answered from direct evidence/);
+    expect(results[0].text).toContain('the cheapest way to find out');
+    expect(results[0].text).toContain('3 different pathways for you to choose between');
+    expect(results[0].text).not.toMatch(/no evidence found/i);
 
     // 12: every Hippo turn went through the metered gateway on the cheapest tier.
     const turns = await db.aiUsage.findMany({ where: { task: 'converse', userId } });

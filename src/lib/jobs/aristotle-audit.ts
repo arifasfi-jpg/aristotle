@@ -3,9 +3,11 @@
 //
 // Steps and their durable checkpoints (resume = the next step after the last checkpoint):
 //   PLAN      → research.json { stage: 'PLANNED', plan }       (existing Aristotle plan checkpoint)
-//   RESEARCH  → research.json (complete: sources, findings)     (existing Aristotle research checkpoint)
-//   DECIDE    → Job.state.report (decision memo, validated)     (new: so a crash before saving does not re-decide)
-//   SAVE      → Audit.report, audit.json, README.md, research.json, computePaise/marginPaise from the ledger
+//   RESEARCH  → research.json (first pass: sources, findings)   (existing Aristotle research checkpoint)
+//   ESCALATE  → research.json { escalation.roundsDone 1..3 }    (one widening round per step; see research-escalation.ts)
+//   DECIDE    → Job.state.report (decision memo, validated)     (so a crash before saving does not re-decide)
+//   PATHWAYS  → Job.state.pathways (3–5 alternatives)           (a completed report always has pathways)
+//   SAVE      → Audit.report (+ pathways), audit.json, README.md, research.json, computePaise/marginPaise from the ledger
 import type { Job, Prisma } from '@prisma/client';
 import { db } from '../db';
 import { runAudit } from '../ai';
@@ -13,7 +15,11 @@ import type { AuditReport } from '../audit';
 import { auditCostInr, callCeilingInr } from '../ai-usage';
 import { costCeilingInr, PLATFORM_MARGIN, type BudgetPolicy } from '../cost-governor';
 import { getLockedFacts, getResearch, getScopeRecord, payableError, saveResearch } from '../audit-meta';
-import { isPlanCheckpoint } from '../research';
+import { isPlanCheckpoint, needsEscalation } from '../research';
+import { ROUND_MIN_MS } from '../research-escalation';
+import { generateJson } from '../hippo/gateway';
+import { normalisePathways, pathwayRefs, PATHWAYS_SCHEMA, pathwaysPrompt } from '../hippo/pathways';
+import type { PathwaysResult, Understanding } from '../hippo/types';
 import type { Scope } from '../routing';
 import type { ResearchRecord } from '../evidence';
 import { enqueueJob, kickJob, registerJobHandler, renewLease, requeueJob, type JobHandler, type StepResult } from './runtime';
@@ -31,7 +37,14 @@ function policyOf(job: Job): BudgetPolicy {
   return { scope: { type: 'AUDIT', id: job.budgetScopeId }, includedInr: included, warningInr: Math.round(included * 0.9 * 100) / 100, nearLimitInr: Math.round(included * 0.95 * 100) / 100, perCallInr: callCeilingInr(), canAskFounder: false };
 }
 
-type AuditState = { report?: AuditReport; provider?: string } | null;
+type AuditState = { report?: AuditReport; provider?: string; pathways?: PathwaysResult } | null;
+
+/**
+ * Share of the audit's cost limit that research escalation may spend before it stops widening (the decision memo and
+ * pathways always keep the rest). Default 60%: ₹99 → ₹76 limit → escalation stops at ₹45.6 of ledger spend.
+ */
+export const researchSpendShare = () => { const n = Number(process.env.HIPPO_RESEARCH_SPEND_SHARE); return Number.isFinite(n) && n > 0 && n < 1 ? n : 0.6; };
+const PATHWAYS_STEP_MS = 42_000;
 
 async function loadOwnedAudit(job: Job) {
   // Ownership is re-verified inside the worker: the job's owner must own the audit it works on.
@@ -54,16 +67,28 @@ async function step({ job, deadline, workerId }: { job: Job; deadline: number; w
   if (audit.status !== 'generating') await db.audit.updateMany({ where: { id: audit.id, report: '{}' }, data: { status: 'generating' } });
   const state = (job.state ?? null) as AuditState;
 
-  // SAVE: the decision memo exists durably → persist it.
+  const usage = { userId: audit.userId, auditId: audit.id, parentType: 'AUDIT' as const, parentId: audit.id, budget: policyOf(job) };
+
+  // PATHWAYS: the decision memo exists durably → lay out the alternatives before the report is complete.
+  if (state?.report && !state.pathways) {
+    const research = await getResearch(audit.id);
+    const objective = await db.objective.findFirst({ where: { auditId: audit.id }, select: { text: true, understanding: true, companyName: true } });
+    const timeoutMs = Math.min(40_000, deadline - Date.now() - 2_000);
+    const r = await generateJson<unknown>('pathways', pathwaysPrompt({ objective: objective?.text || audit.idea, understanding: (objective?.understanding ?? null) as Understanding | null, facts: founderFacts, research, report: state.report, company: objective?.companyName ?? null }), PATHWAYS_SCHEMA, { timeoutMs }, usage);
+    const pathways = normalisePathways(r.data, pathwayRefs(research, founderFacts));
+    await renewLease(job, workerId);
+    return { checkpoint: 'PATHWAYS', progress: 'GENERATING_REPORT', state: { ...state, pathways } as unknown as Prisma.InputJsonValue };
+  }
+
+  // SAVE: the decision memo and pathways exist durably → persist them.
   if (state?.report) {
     await renewLease(job, workerId);
-    await saveAudit(audit, scope, founderFacts, state.report, await getResearch(audit.id));
+    await saveAudit(audit, scope, founderFacts, { ...state.report, pathways: state.pathways }, await getResearch(audit.id));
     return { done: true };
   }
 
   const existing = await getResearch(audit.id);
-  const stage: 'PLAN' | 'RESEARCH' | 'DECIDE' = !existing ? 'PLAN' : isPlanCheckpoint(existing) ? 'RESEARCH' : 'DECIDE';
-  const usage = { userId: audit.userId, auditId: audit.id, parentType: 'AUDIT' as const, parentId: audit.id, budget: policyOf(job) };
+  const stage: 'PLAN' | 'RESEARCH' | 'ESCALATE' | 'DECIDE' = !existing ? 'PLAN' : isPlanCheckpoint(existing) ? 'RESEARCH' : needsEscalation(existing) ? 'ESCALATE' : 'DECIDE';
   const result = await runAudit({
     idea: audit.idea,
     sector: audit.sector as never,
@@ -76,6 +101,8 @@ async function step({ job, deadline, workerId }: { job: Job; deadline: number; w
     existingResearch: existing,
     onResearch: async (r) => { await renewLease(job, workerId); await saveResearch(audit.id, r); }, // lease-guarded checkpoint
     usage,
+    // Escalation widens research until this share of the audit's cost limit is spent; the memo keeps the rest.
+    researchSpend: { spentInr: async () => (await auditCostInr(audit.id)) ?? 0, capInr: Math.round(job.budgetInr * researchSpendShare() * 100) / 100 },
     budgetMs: deadline - Date.now(),
     ...(stage === 'DECIDE' ? {} : { stopAfter: stage }),
   });
@@ -85,7 +112,9 @@ async function step({ job, deadline, workerId }: { job: Job; deadline: number; w
     return { checkpoint: 'DECIDED', progress: 'GENERATING_REPORT', state: { report: result.report, provider: result.provider } as unknown as Prisma.InputJsonValue };
   }
   if (isPlanCheckpoint(result.research)) return { checkpoint: 'PLANNED', progress: 'RESEARCHING' };
-  return { checkpoint: 'RESEARCHED', progress: 'ANALYSING' };
+  const rounds = result.research.escalation?.roundsDone ?? 0;
+  if (needsEscalation(result.research)) return { checkpoint: rounds ? `ESCALATED_${rounds}` : 'RESEARCHED', progress: 'RESEARCHING' };
+  return { checkpoint: 'ESCALATED', progress: 'ANALYSING' };
 }
 
 /** Persistence of a completed audit — moved verbatim from the payment route (same files, same fields). */
@@ -105,8 +134,17 @@ export async function saveAudit(audit: { id: string; idea: string; sector: strin
 }
 
 const handler: JobHandler = {
-  // A step is only started with enough time for the slowest stage (search + extract ≈ 30s; decision ≥ 16s).
-  minStepMs: (job) => ((job.state as AuditState)?.report ? 2_000 : job.checkpoint === 'PLANNED' ? 30_000 : 17_000),
+  // A step is only started with enough time for its stage (search + extract ≈ 30s; escalation rounds per ROUND_MIN_MS;
+  // decision ≥ 16s; pathways ≈ 40s; save 2s).
+  minStepMs: (job) => {
+    const st = job.state as AuditState;
+    if (st?.report) return st.pathways ? 2_000 : PATHWAYS_STEP_MS;
+    if (job.checkpoint === 'PLANNED') return 30_000;
+    if (job.checkpoint === 'RESEARCHED') return ROUND_MIN_MS[1] + 1_000;
+    const m = job.checkpoint?.match(/^ESCALATED_(\d)$/);
+    if (m) return (ROUND_MIN_MS[Number(m[1]) + 1] ?? 16_000) + 1_000;
+    return 17_000;
+  },
   policy: policyOf,
   step,
   async onStatus(job, status) {

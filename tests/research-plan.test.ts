@@ -39,13 +39,16 @@ async function fakeFetch(url: string, init?: RequestInit) {
     return tavilyDown ? new Response('down', { status: 500 }) : new Response(JSON.stringify({ results: [SOURCE] }), { status: 200 });
   }
   const prompt: string = body.contents[0].parts[0].text;
-  const kind = prompt.includes('research planner') ? 'plan' : prompt.includes('You extract evidence for ONE research question') ? 'extract' : 'decision';
+  // Research escalation (follow-up query planning, gap explanations) is its own kind of call, never the decision.
+  const kind = prompt.includes('research planner') ? 'plan' : prompt.includes('You extract evidence for ONE research question') ? 'extract'
+    : prompt.includes('FOLLOW-UP web searches') ? 'escalate' : prompt.includes('Research could not settle') ? 'gap' : 'decision';
   calls.push({ kind, body });
   if (kind === 'plan') {
     if (rejectThinking && body.generationConfig.thinkingConfig) return new Response('{"error":{"message":"thinking_level is not supported for this model"}}', { status: 400 });
     await delay(planDelayMs, init?.signal);
     return reply(PLAN);
   }
+  if (kind === 'escalate' || kind === 'gap') return reply({}); // → deterministic follow-up queries / gap explanations
   if (kind === 'extract') return reply(prompt.includes('Do Pune parents buy') ? { status: 'ANSWERED', findings: [{ statement: 'Urban parents request bilingual picture books.', sourceId: 'S1', quote: 'Bilingual picture books in Hindi and English are increasingly requested by urban parents', confidence: 'MEDIUM' }] } : { status: 'NOT_FOUND', findings: [] });
   return reply({ ...deterministicAudit({ idea: IDEA, sector: 'D2C / Consumer' }), oneLineVerdict: 'Test verdict' });
 }
@@ -146,8 +149,12 @@ describe('Research plan checkpoint: retry never repeats a completed stage', () =
     const r = await run({ existingResearch: checkpoint, onResearch: async (x) => { savedRecords.push(x); } });
     const after = calls.slice(before).map((c) => c.kind);
     expect(after).not.toContain('plan');
-    expect(after.filter((k) => k === 'tavily')).toHaveLength(6);
+    // The first pass searches the 6 planned queries once each; unanswered questions are then widened, never closed as-is.
+    const tavilyQueries = calls.slice(before).filter((c) => c.kind === 'tavily').map((c) => c.body.query);
+    expect(tavilyQueries.slice(0, 6)).toEqual(PLAN.questions.map((q) => q.query));
+    expect(tavilyQueries.length).toBeGreaterThan(6);
     expect(r.research!.questions!.map((q) => q.query)).toEqual(PLAN.questions.map((q) => q.query));
+    expect(r.research!.escalation).toMatchObject({ complete: true, roundsDone: 3 });
     expect(savedRecords.at(-1)!.stage).toBeUndefined(); // complete research replaces the checkpoint
   });
 

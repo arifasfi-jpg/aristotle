@@ -23,19 +23,59 @@ export type EvidenceStatus = (typeof EVIDENCE_STATUS)[number];
 
 export const RESEARCH_CATEGORIES = ['DEMAND', 'ALTERNATIVES_PRICING', 'REGULATION', 'CHANNEL', 'COST', 'OPERATIONS', 'OTHER'] as const;
 export type ResearchCategory = (typeof RESEARCH_CATEGORIES)[number];
-export const QUESTION_STATUS = ['ANSWERED', 'PARTIAL', 'NOT_FOUND', 'CONTRADICTORY', 'SEARCH_FAILED'] as const;
+// ANALOGOUS: after escalation, only analogous evidence exists (another country, segment or industry) — still a gap.
+export const QUESTION_STATUS = ['ANSWERED', 'PARTIAL', 'ANALOGOUS', 'NOT_FOUND', 'CONTRADICTORY', 'SEARCH_FAILED'] as const;
 export type QuestionStatus = (typeof QUESTION_STATUS)[number];
-export const GAP_STATUSES: QuestionStatus[] = ['PARTIAL', 'NOT_FOUND', 'CONTRADICTORY', 'SEARCH_FAILED'];
+export const GAP_STATUSES: QuestionStatus[] = ['PARTIAL', 'ANALOGOUS', 'NOT_FOUND', 'CONTRADICTORY', 'SEARCH_FAILED'];
+
+/** DIRECT: answers the question for this business and geography. ANALOGOUS: a comparable case that only informs it. */
+export const EVIDENCE_TYPES = ['DIRECT', 'ANALOGOUS'] as const;
+export type EvidenceType = (typeof EVIDENCE_TYPES)[number];
+/** How a search was aimed. Round 0 is the planner's first query; escalation rounds widen the search step by step. */
+export const SEARCH_STRATEGIES = [
+  'INITIAL', 'REFORMULATED', 'INDIA_PRIMARY', 'INDIA_COMPANIES', 'INDIA_SECONDARY', 'COMPETITOR_EXAMPLES',
+  'GLOBAL', 'INDUSTRY_REPORTS', 'INTERNATIONAL_ANALOGUE', 'CROSS_INDUSTRY_ANALOGUE',
+] as const;
+export type SearchStrategy = (typeof SEARCH_STRATEGIES)[number];
+export type ResearchAttempt = {
+  round: number; strategy: SearchStrategy; query: string; scope: 'INDIA' | 'GLOBAL'; domains?: string[];
+  sources: number; newSources: number; findings: number; failed?: boolean;
+};
+/** What the founder is told about a question that research could not settle (never a bare "no evidence found"). */
+export type ResolutionKind = 'EXPERIMENT' | 'INTERVIEW' | 'DATA_REQUEST';
+export type EvidenceGap = {
+  closestEvidence: string; closestEvidenceIds: string[]; implication: string; stillUnknown: string;
+  resolveBy: { kind: ResolutionKind; action: string };
+};
 
 export type BusinessModel = {
   summary: string; customer: string; payer: string; offering: string; revenueMechanism: string;
   keyActivities: string[]; regulatedActivities: { activity: string; whyRegulated: string }[];
 };
 export type ResearchSource = { id: string; title: string; url: string; snippet: string; content?: string; query: string; questionId?: string; retrievedAt: string };
-export type Finding = { id: string; questionId: string; statement: string; sourceId: string; quote: string; confidence: Confidence };
+export type Finding = {
+  id: string; questionId: string; statement: string; sourceId: string; quote: string; confidence: Confidence;
+  /** Absent on records written before escalation existed: treated as DIRECT. */
+  evidenceType?: EvidenceType; geography?: string; sourceDate?: string; round?: number;
+  /** For ANALOGOUS evidence: what the comparable case is and why it is only an analogue. */
+  analogy?: string;
+};
 export type ResearchQuestion = {
   id: string; category: ResearchCategory; question: string; whyItMatters: string; query: string; activity?: string;
   status: QuestionStatus; sourceIds: string[]; findingIds: string[]; note?: string;
+  /** Every search made for this question (initial + escalation), so a gap shows what was actually tried. */
+  attempts?: ResearchAttempt[];
+  /** Set when escalation finished without direct evidence that answers the question. */
+  gap?: EvidenceGap;
+};
+export type EscalationState = {
+  /** 0 = not started; 1 = India-wide round done; 2 = global/analogue round done; 3 = gaps explained (complete). */
+  roundsDone: number;
+  complete: boolean;
+  /** Queries chosen for each question and strategy (planned once, reused on retry). */
+  plan?: Record<string, { strategy: SearchStrategy; query: string }[]>;
+  /** Why escalation stopped early (e.g. the audit's research spend cap), shown to the founder. */
+  stoppedReason?: string;
 };
 export type ResearchRecord = {
   version: 1 | 2;
@@ -50,6 +90,8 @@ export type ResearchRecord = {
   /** 'PLANNED' = checkpoint after the planning call only (no searches yet); absent = complete research. */
   stage?: 'PLANNED';
   plan?: { businessModel: BusinessModel; questions: Omit<ResearchQuestion, 'status' | 'sourceIds' | 'findingIds'>[] };
+  /** Research escalation progress. Absent = research written before escalation existed (escalated on resume). */
+  escalation?: EscalationState;
 };
 
 export type EvidenceClaim = { claim: string; type: ClaimType; sourceIds: string[]; confidence: Confidence; validation: string; verified?: boolean; note?: string };
@@ -120,6 +162,10 @@ export function validateEvidence<T extends ReportLike>(report: T, research: Rese
     log.droppedSourceIds += ids.length - valid.length;
     let note: string | undefined;
     if (type === 'FACT' && !valid.some(isEvidence)) { type = 'INFERENCE'; confidence = 'LOW'; note = 'No verifiable research evidence was found for this claim.'; log.downgradedFacts++; }
+    // An analogue (another country, segment or industry) informs a claim; it never proves it.
+    else if (type === 'FACT' && !valid.some((id) => sourceIds.has(id) || (findingById.has(id) && findingById.get(id)!.evidenceType !== 'ANALOGOUS'))) {
+      type = 'INFERENCE'; note = 'Supported only by analogous evidence, so this is an inference, not a fact.'; log.downgradedFacts++;
+    }
     if (type === 'FOUNDER' && !valid.some((id) => factIds.has(id))) { type = 'ASSUMPTION'; note = 'Not a founder-confirmed figure.'; }
     return { claim: str(e.claim, 500), type, sourceIds: valid, confidence, validation: str(e.validation, 400), verified: valid.length > 0, ...(note ? { note } : {}) };
   }).filter((e) => e.claim);

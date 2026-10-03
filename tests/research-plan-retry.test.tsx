@@ -1,5 +1,6 @@
 // Paid audit whose research fails after planning: Retry (existing verify route, no payment fields) resumes from the
 // saved plan. Real routes + REAL PostgreSQL; only Gemini/Tavily HTTP and the cookie jar are faked. Skipped without the DB env.
+import { escalationKind, escalationReply } from './helpers/escalation-fakes';
 import { describe, expect, it, vi } from 'vitest';
 
 const E2E = Boolean(process.env.HIPPO_E2E_DATABASE_URL && process.env.HIPPO_E2E_PRISMA_CLIENT && process.env.HIPPO_E2E_ADAPTER);
@@ -31,10 +32,10 @@ describe.skipIf(!E2E)('Retry resumes from the saved research plan (real Postgres
       const body = JSON.parse(String(init?.body || '{}'));
       if (url.includes('tavily')) { kinds.push('tavily'); return tavilyDown ? new Response('down', { status: 500 }) : new Response(JSON.stringify({ results: [{ title: 'Kids books', url: `https://example.org/${encodeURIComponent(body.query)}`, content: 'Bilingual picture books are increasingly requested by urban parents.' }] }), { status: 200 }); }
       const prompt: string = body.contents[0].parts[0].text;
-      const k = prompt.includes('Restate what this founder') ? 'understand' : prompt.includes('research planner') ? 'plan' : prompt.includes('You extract evidence') ? 'extract' : 'decision';
+      const k = prompt.includes('Restate what this founder') ? 'understand' : prompt.includes('research planner') ? 'plan' : prompt.includes('You extract evidence') ? 'extract' : escalationKind(prompt) ?? 'decision';
       kinds.push(k);
       const data = k === 'understand' ? { objective: 'Grow to 3,000 copies a month', target: '3,000 copies a month', currentState: '300 copies a month', keyQuestion: 'Which channels?', businessKind: 'EXISTING_BUSINESS' }
-        : k === 'plan' ? PLAN : k === 'extract' ? { status: 'NOT_FOUND', findings: [] } : { ...deterministicAudit({ idea: IDEA, sector: 'D2C / Consumer' }), oneLineVerdict: 'Verdict' };
+        : k === 'plan' ? PLAN : k === 'extract' ? { status: 'NOT_FOUND', findings: [] } : k === 'escalate' || k === 'gap' || k === 'pathways' ? escalationReply(prompt) : { ...deterministicAudit({ idea: IDEA, sector: 'D2C / Consumer' }), oneLineVerdict: 'Verdict' };
       return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(data) }] } }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 10 } }), { status: 200 });
     }));
     const { db } = await import('@/lib/db') as { db: any }; // eslint-disable-line @typescript-eslint/no-explicit-any

@@ -5,6 +5,8 @@ import { db } from '../db';
 import { applyTurn, emptyState, handoffText, isApproval, isStop, OPENING, parseModelTurn, turnPrompt, TURN_SCHEMA, type BusinessState, type ModelTurn, type Phase, type Status } from './conversation';
 import { aiMeta, generateJson } from './gateway';
 import { parseReport } from './aristotle';
+import { getResearch } from '../audit-meta';
+import type { ResearchRecord } from '../evidence';
 import { createObjective } from './service';
 import { stableId } from './context';
 
@@ -99,7 +101,27 @@ async function explainResultIfReady(conv: { id: string; objectiveId: string | nu
   if (!report) return;
   const id = stableId('hres', conv.id, objective.id); // one explanation per handed-off objective, even on concurrent loads
   if (await db.conversationMessage.findUnique({ where: { id } })) return;
-  const text = `The research is back. Short version: ${report.oneLineVerdict || report.verdict}\n\n${report.verdict && report.verdict !== report.oneLineVerdict ? `${report.verdict}\n\n` : ''}The full analysis — evidence, sources and the possible routes — is on your objective page. Tell me what you think, or ask me to challenge any of it.`;
+  const research = (await getResearch(objective.auditId)) as ResearchRecord | null;
+  const coverage = researchCoverage(research, report.pathways?.pathways?.length ?? 0);
+  const text = `The research is back. Short version: ${report.oneLineVerdict || report.verdict}\n\n${report.verdict && report.verdict !== report.oneLineVerdict ? `${report.verdict}\n\n` : ''}${coverage ? `${coverage}\n\n` : ''}The full analysis — evidence, sources and the possible routes — is on your objective page. Tell me what you think, or ask me to challenge any of it.`;
   await db.conversationMessage.createMany({ skipDuplicates: true, data: [{ id, conversationId: conv.id, role: 'HIPPO', text, meta: json({ kind: 'RESULT', objectiveId: objective.id }) }] });
   await db.conversation.update({ where: { id: conv.id }, data: { updatedAt: new Date() } });
+}
+
+/**
+ * One honest line on what research established, in Hippo's voice — never a list of "no evidence found". Questions it
+ * could not settle are summarised once; the objective page shows, per question, what was checked, the closest evidence,
+ * what it implies and the cheapest way to find out.
+ */
+export function researchCoverage(r: ResearchRecord | null, pathways: number): string {
+  const qs = r?.questions || [];
+  if (!qs.length) return '';
+  const n = (s: string[]) => qs.filter((q) => s.includes(q.status)).length;
+  const answered = n(['ANSWERED']); const partly = n(['PARTIAL', 'CONTRADICTORY']); const analogous = n(['ANALOGOUS']); const open = n(['NOT_FOUND', 'SEARCH_FAILED']);
+  const parts = [`${answered} of ${qs.length} questions answered from direct evidence`];
+  if (partly) parts.push(`${partly} partly`);
+  if (analogous) parts.push(`${analogous} only from comparable cases elsewhere`);
+  if (open) parts.push(`${open} I couldn’t establish from public evidence even after widening the search`);
+  const gaps = partly + analogous + open;
+  return `I looked into ${qs.length} questions: ${parts.join(', ')}.${gaps ? ' For each gap I’ve noted what I checked, the closest evidence, and the cheapest way to find out.' : ''}${pathways ? ` I’ve laid out ${pathways} different pathways for you to choose between.` : ''}`;
 }

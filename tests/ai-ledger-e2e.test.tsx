@@ -5,6 +5,7 @@
 // provider is counted so the test proves the ledger misses nothing.
 //
 // Runs when HIPPO_E2E_DATABASE_URL / HIPPO_E2E_PRISMA_CLIENT / HIPPO_E2E_ADAPTER are set (see hippo-e2e.test.tsx).
+import { escalationReply } from './helpers/escalation-fakes';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const E2E = Boolean(process.env.HIPPO_E2E_DATABASE_URL && process.env.HIPPO_E2E_PRISMA_CLIENT && process.env.HIPPO_E2E_ADAPTER);
@@ -36,6 +37,7 @@ function gemini(prompt: string): unknown {
     { category: 'DEMAND', question: 'How many diabetics test at home?', whyItMatters: 'Demand', query: 'home glucose testing india' } ] };
   if (prompt.includes('You extract evidence for ONE research question')) return prompt.includes('Where do Indians buy') ? { status: 'ANSWERED', findings: [{ statement: 'Chemists are the main purchase point.', sourceId: 'S1', quote: 'Retail chemists remain the main point of purchase', confidence: 'MEDIUM' }] } : { status: 'NOT_FOUND', findings: [] };
   if (prompt.includes('executing a work item')) return { summary: 'Plan.', markdown: `# Plan\n\n${'Detail. '.repeat(40)}`, assumptions: [], founderInputsNeeded: [], professionalReviewRequired: false };
+  const esc = escalationReply(prompt); if (esc !== undefined) return esc; // research escalation + pathways
   return null; // decision memo
 }
 
@@ -112,10 +114,12 @@ describe.skipIf(!E2E)('AI usage ledger + endpoint protection (real Postgres)', (
     // 1 + 2: nothing escapes the ledger.
     expect(rows.filter((x: { provider: string }) => x.provider === 'gemini')).toHaveLength(made.gemini);
     expect(rows.filter((x: { kind: string }) => x.kind === 'SEARCH')).toHaveLength(made.tavily);
-    expect(made.tavily).toBe(4);
+    // 4 first-pass searches, then escalation widens the 3 unanswered questions (3 India-wide + 3 beyond India each).
+    expect(made.tavily).toBe(4 + 3 * 6);
     const tasks = rows.map((x: { task: string }) => x.task);
-    for (const t of ['understand', 'scope-classifier', 'research-plan', 'research-search', 'research-extract', 'decision', 'explore', 'execute']) expect([t, tasks.includes(t)]).toEqual([t, true]);
+    for (const t of ['understand', 'scope-classifier', 'research-plan', 'research-search', 'research-extract', 'research-escalate', 'research-gap', 'decision', 'pathways', 'explore', 'execute']) expect([t, tasks.includes(t)]).toEqual([t, true]);
     const purposeOf = Object.fromEntries(rows.map((x: { task: string; purpose: string }) => [x.task, x.purpose]));
+    expect(purposeOf).toMatchObject({ 'research-escalate': 'RESEARCH', 'research-gap': 'RESEARCH', pathways: 'ARISTOTLE' });
     expect(purposeOf).toMatchObject({ understand: 'ARISTOTLE', 'scope-classifier': 'ARISTOTLE', 'research-plan': 'RESEARCH', 'research-search': 'RESEARCH', 'research-extract': 'RESEARCH', decision: 'ARISTOTLE', explore: 'OPPORTUNITY', execute: 'WORK' });
 
     // 3: rupee cost per actual model. Phase 1.1 contract change: the default model now carries its VERIFIED price

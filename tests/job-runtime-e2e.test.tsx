@@ -1,6 +1,7 @@
 // Phase 2 — durable job runtime on REAL PostgreSQL. Real routes, real job runtime, real gateway + cost governor + ledger;
 // only Gemini/Tavily HTTP and the cookie jar are faked. Tests A–Z plus the two critical tests (worker death mid-audit,
 // four concurrent workers on one finite budget). Skipped without the HIPPO_E2E_* database env.
+import { escalationKind, escalationReply } from './helpers/escalation-fakes';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const E2E = Boolean(process.env.HIPPO_E2E_DATABASE_URL && process.env.HIPPO_E2E_PRISMA_CLIENT && process.env.HIPPO_E2E_ADAPTER);
@@ -29,7 +30,7 @@ const env = { ...process.env };
 
 function kind(prompt: string) {
   return prompt.includes('Restate what this founder') ? 'understand' : prompt.includes('Classify this request for Aristotle') ? 'classify' : prompt.includes('research planner') ? 'plan'
-    : prompt.includes('You extract evidence') ? 'extract' : prompt.startsWith('COMPARE') ? 'compare' : 'decision';
+    : prompt.includes('You extract evidence') ? 'extract' : prompt.startsWith('COMPARE') ? 'compare' : escalationKind(prompt) ?? 'decision';
 }
 beforeAll(() => {
   Object.assign(process.env, { HIPPO_USAGE_LEDGER: 'on', GEMINI_API_KEY: 'test', TAVILY_API_KEY: 'test', DEMO_MODE: 'true', VERCEL_ENV: 'preview', GEMINI_MODEL: 'gemini-3.5-flash-lite', USD_INR: '88', CRON_SECRET: 'cron-secret-for-tests-0123456789' });
@@ -54,6 +55,7 @@ beforeAll(() => {
     else if (k === 'plan') data = PLAN;
     else if (k === 'extract') data = prompt.includes('Question 1:') ? { status: 'ANSWERED', findings: [{ statement: 'Chemists are the main purchase point.', sourceId: 'S1', quote: 'Retail chemists remain the main point of purchase', confidence: 'MEDIUM' }] } : { status: 'NOT_FOUND', findings: [] };
     else if (k === 'compare') data = { ok: true };
+    else if (k === 'escalate' || k === 'gap' || k === 'pathways') data = escalationReply(prompt);
     else { const { deterministicAudit } = await import('@/lib/audit'); data = { ...deterministicAudit({ idea: IDEA, sector: 'Healthtech' }), unitEconomics: [] }; }
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(data) }] } }], usageMetadata: k === 'compare' ? { promptTokenCount: 10_000, candidatesTokenCount: 2_000, thoughtsTokenCount: 1_000 } : USAGE }), { status: 200 });
   }));
@@ -166,11 +168,14 @@ describe.skipIf(!E2E)('Durable job runtime (real Postgres)', () => {
     expect(await jobs.runJob(job.id, { workerId: 'worker-2' })).toMatchObject({ status: 'NOT_CLAIMED' }); // too early
     await sleep(1700);
     const r = await jobs.runJob(job.id, { workerId: 'worker-2' });
-    expect(r).toMatchObject({ status: 'COMPLETED', steps: 3 }); // RESEARCH → DECIDE → SAVE (PLAN not repeated)
+    // RESEARCH → ESCALATE ×3 (India-wide, beyond India, explain gaps) → DECIDE → PATHWAYS → SAVE (PLAN not repeated)
+    expect(r).toMatchObject({ status: 'COMPLETED', steps: 7 });
     const made = calls.slice(before);
     expect(made.filter((c) => c === 'plan')).toHaveLength(1);
     expect(made.filter((c) => c === 'decision')).toHaveLength(1);
-    expect(made.filter((c) => c === 'search')).toHaveLength(8); // 4 lost with worker 1 + 4 by worker 2
+    // 4 lost with worker 1 + 4 first-pass by worker 2 + 18 escalation searches (3 unanswered questions × 6 widened avenues)
+    expect(made.filter((c) => c === 'search')).toHaveLength(26);
+    expect(made.filter((c) => c === 'pathways')).toHaveLength(1);
     const done = await db.job.findUnique({ where: { id: job.id } });
     expect(done).toMatchObject({ status: 'COMPLETED', progress: 'COMPLETED', attempts: 1, leaseOwner: null });
     const a = await db.audit.findUnique({ where: { id: auditId } });
@@ -186,7 +191,8 @@ describe.skipIf(!E2E)('Durable job runtime (real Postgres)', () => {
     // AiUsage: one row per call made; the lost searches are booked at their worst case (the dead worker never recorded them).
     const rows = await db.aiUsage.findMany({ where: { parentType: 'AUDIT', parentId: auditId } });
     const by = (task: string, outcome: string) => rows.filter((x: Row) => x.task === task && x.outcome === outcome).length;
-    expect([by('research-plan', 'SUCCESS'), by('research-search', 'SUCCESS'), by('research-search', 'UNKNOWN_PROVIDER_OUTCOME'), by('decision', 'SUCCESS')]).toEqual([1, 4, 4, 1]);
+    expect([by('research-plan', 'SUCCESS'), by('research-search', 'SUCCESS'), by('research-search', 'UNKNOWN_PROVIDER_OUTCOME'), by('decision', 'SUCCESS')]).toEqual([1, 4 + 18, 4, 1]);
+    expect([by('research-escalate', 'SUCCESS'), by('research-gap', 'SUCCESS'), by('pathways', 'SUCCESS')]).toEqual([1, 1, 1]);
     expect(rows.filter((x: Row) => x.outcome === 'UNKNOWN_PROVIDER_OUTCOME').every((x: Row) => x.costStatus === 'ESTIMATED' && Math.abs(x.costInr - 1.408) < 1e-6)).toBe(true);
     expect(await db.costReservation.count({ where: { scopeType: 'AUDIT', scopeId: auditId, releasedAt: null } })).toBe(0);
     // Total cost = ledger = audit compute = job cost.
@@ -215,13 +221,16 @@ describe.skipIf(!E2E)('Durable job runtime (real Postgres)', () => {
     await jobs.settleDetached();
     const a = await db.audit.findUnique({ where: { id: auditId } });
     expect(a.status).toBe('completed');
-    expect(await db.job.findUnique({ where: { id: body.jobId } })).toMatchObject({ status: 'COMPLETED', progress: 'COMPLETED', checkpoint: 'DECIDED' });
+    expect(await db.job.findUnique({ where: { id: body.jobId } })).toMatchObject({ status: 'COMPLETED', progress: 'COMPLETED', checkpoint: 'PATHWAYS' });
     // U: the stored report is exactly what the unchanged engine produces for this input; bundle shape unchanged.
     const { runAudit } = await import('@/lib/ai');
     const { getLockedFacts } = await import('@/lib/audit-meta');
     const research = JSON.parse((await db.projectFile.findFirst({ where: { auditId, path: 'research.json' } })).content);
     const direct = await runAudit({ idea: a.idea, sector: a.sector, stage: a.stage || undefined, geography: a.geography || 'India', language: a.reportLanguage, scope: 'GROWTH_PLAN', founderFacts: await getLockedFacts(auditId) }, { existingResearch: research });
-    expect(JSON.parse(a.report)).toEqual(JSON.parse(JSON.stringify(direct.report)));
+    // Same report, plus the pathways the job lays out after the decision memo (an additive key).
+    const stored = JSON.parse(a.report);
+    expect(stored.pathways.pathways).toHaveLength(3);
+    expect(stored).toEqual(JSON.parse(JSON.stringify({ ...direct.report, pathways: stored.pathways })));
     const bundle = JSON.parse((await db.projectFile.findFirst({ where: { auditId, path: 'audit.json' } })).content);
     expect(Object.keys(bundle)).toEqual(['auditId', 'idea', 'sector', 'scope', 'founderFacts', 'report', 'pricing']);
     expect(bundle.pricing).toEqual({ computeInr: a.computePaise / 100, marginInr: a.marginPaise / 100, source: 'AI_USAGE_LEDGER', platformMargin: '10% of disclosed compute' });

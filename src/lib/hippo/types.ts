@@ -57,10 +57,23 @@ export type Understanding = {
   source: 'AI' | 'FOUNDER_NUMBERS';
 };
 
-export type PathwayEvidence = { statement: string; refs: string[] };
+/** Where a pathway idea comes from. Pathways are alternatives for the founder to choose between — never ranked. */
+export const PATHWAY_LENSES = [
+  'OBVIOUS_ROUTE', 'ADJACENT_ROUTE', 'INTERNATIONAL_ANALOGUE', 'CROSS_INDUSTRY_TRANSFER', 'BUSINESS_MODEL_INVERSION',
+  'DISTRIBUTION_ARBITRAGE', 'AI_TECHNOLOGY_LEVERAGE', 'ASSET_LIGHT', 'UNUSUAL_PLAUSIBLE', 'FOUNDER_SPECIFIC',
+] as const;
+export type PathwayLens = (typeof PATHWAY_LENSES)[number];
+/** kind: what backs the statement — a DIRECT research finding, an ANALOGOUS one, or a founder fact. */
+export type PathwayEvidence = { statement: string; refs: string[]; kind?: 'DIRECT' | 'ANALOGOUS' | 'FOUNDER' };
 export type Pathway = {
   id: string;            // P1…
   name: string;
+  lens?: PathwayLens;
+  model?: string;                     // the business model of this pathway (howItWorks mirrors it for older readers)
+  customer?: string;
+  valueProposition?: string;
+  revenueMechanism?: string;
+  assumptions?: string[];
   howItWorks: string;
   whyPlausible: string;
   evidence: PathwayEvidence[];        // only R#/F# backed statements survive validation
@@ -69,7 +82,7 @@ export type Pathway = {
   risks: string[];
   firstExperiment: string;
   contributionToTarget: string;
-  evidenceStrength: 'SUPPORTED' | 'PARTIAL' | 'NOT_YET_ESTABLISHED';
+  evidenceStrength: 'SUPPORTED' | 'PARTIAL' | 'ANALOGOUS' | 'NOT_YET_ESTABLISHED';
 };
 export type PathwaysResult = {
   goal: string;

@@ -14,10 +14,10 @@ import { computeEstimates, midpoint, normaliseEffort } from './costs';
 import { comparePrompt, COMPARE_SCHEMA, EXECUTE_SCHEMA, executePrompt, isCustomerFacing, normaliseOutput, positionQuote, rulesExplanation, withAiProvenance, type QuoteComparison } from './execution';
 import { aiMeta, executionPrice, generateJson, type GatewayResult } from './gateway';
 import { BRIEF_SCHEMA, briefPrompt, normaliseBrief, normalisePlan, PLAN_SCHEMA, planPrompt, type BriefData } from './mogli';
-import { normalisePathways, PATHWAYS_SCHEMA, pathwaysPrompt } from './pathways';
+import { normalisePathways, pathwayRefs, PATHWAYS_SCHEMA, pathwaysPrompt } from './pathways';
 import { canExecuteNow, workPaymentPlan } from './payments';
 import { classifyInputs, itemKey, type BriefInput, type ProvenanceContext } from './provenance';
-import { ensureAudit, parseReport, syncAristotle, understandObjective } from './aristotle';
+import { ensureAudit, parseReport, persistPathways, syncAristotle, understandObjective } from './aristotle';
 import { advanceTo, businessName, DEFAULT_ORG_NAME, DEMO_COMPANY_NAME, isExecutionMode, PROVIDER_TIERS, type EffortModel, type PathwaysResult, type Understanding } from './types';
 
 type Org = { id: string; isDemo?: boolean; name?: string };
@@ -147,15 +147,12 @@ async function loadAristotle(objective: Objective) {
 export async function generatePathways(objective: Objective) {
   const { memo, report, research, facts } = await loadAristotle(objective);
   if (memo.pathways) return memo.pathways as unknown as PathwaysResult;
+  // Normally the audit job already generated them with the report (synced onto the memo); older reports did not.
+  if (report.pathways?.pathways?.length) { await persistPathways(objective, memo.id, report.pathways); return report.pathways; }
   const r = await generateJson<unknown>('pathways', pathwaysPrompt({ objective: objective.text, understanding: objective.understanding as Understanding | null, facts, research, report, company: await companyFor(objective) }), PATHWAYS_SCHEMA, {}, { organizationId: objective.organizationId, objectiveId: objective.id, parentType: 'REQUEST' });
   await logAi(objective.organizationId, objective.id, null, r, 'Aristotle');
-  const result = normalisePathways(r.data, { findings: new Set((research?.findings || []).map((f) => f.id)), facts: new Set(facts.map((f) => f.id)) });
-  await db.decisionMemo.update({ where: { id: memo.id }, data: { pathways: json(result), founderChecklist: json(result.founderChecklist) } });
-  await db.objective.update({ where: { id: objective.id }, data: { pathways: json(result.pathways), stage: advanceTo(objective.stage, 'PATHWAYS') } });
-  await logActivity({ organizationId: objective.organizationId, objectiveId: objective.id, type: 'PATHWAYS_GENERATED', actor: 'Aristotle', message: `${result.pathways.length} pathways to the full objective: ${result.pathways.map((p) => p.name).join(', ')}`.slice(0, 400) });
-  for (const p of result.pathways) {
-    await remember({ organizationId: objective.organizationId, objectiveId: objective.id, kind: 'IDEA', title: `Pathway: ${p.name}`, detail: `${p.howItWorks} Evidence: ${p.evidenceStrength}.`, status: p.evidenceStrength === 'NOT_YET_ESTABLISHED' ? 'HYPOTHESIS' : 'INFERENCE', owner: 'Aristotle', refType: 'pathway', refId: `${objective.id}:${p.id}` });
-  }
+  const result = normalisePathways(r.data, pathwayRefs(research, facts));
+  await persistPathways(objective, memo.id, result);
   return result;
 }
 

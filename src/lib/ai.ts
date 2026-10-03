@@ -5,7 +5,8 @@ import type { Scope } from './routing';
 import { validateEvidence, type ResearchRecord } from './evidence';
 import type { UsageContext } from './ai-usage';
 import { aristotleGeminiJson } from './hippo/gateway';
-import { isPlanCheckpoint, researchBusiness, researchBrief } from './research';
+import { isPlanCheckpoint, needsEscalation, researchBusiness, researchBrief } from './research';
+import { escalateResearch, type EscalationOpts } from './research-escalation';
 
 // Whole audit must fit the 60s serverless limit of /api/payments/verify (DB work included).
 const AUDIT_BUDGET_MS = 54_000;
@@ -36,19 +37,23 @@ const EVIDENCE_BLOCK = `
 ════════════════════════════════════════════════════════════════════════
 EVIDENCE DISCIPLINE (Aristotle's core rule: research before judgement, evidence over confidence)
 ════════════════════════════════════════════════════════════════════════
-You receive a RESEARCH BRIEF: questions Q#, each with a STATUS and verified findings R# (each from a source S#).
-Founder facts are F#. These are the ONLY evidence. Your general knowledge is NOT evidence: anything you add
-from it must be labelled INFERENCE or ASSUMPTION, never FACT, and must not be presented as researched.
+You receive a RESEARCH BRIEF: questions Q#, each with a STATUS, what was searched, and verified findings R# (each
+from a source S#, tagged DIRECT or ANALOGOUS, with geography and date). Founder facts are F#. These are the ONLY evidence.
+DIRECT findings can support a FACT. ANALOGOUS findings (another country, segment or industry) may support an
+INFERENCE or HYPOTHESIS that cites them and names the analogy — never a FACT about this business.
+Use the substance: name the actual companies, products, prices, rules, adoption signals and benchmarks found.
+Your general knowledge is NOT evidence: anything you add from it must be labelled INFERENCE or ASSUMPTION, never FACT, and must not be presented as researched.
 Never invent a source, statistic, competitor, price, market size, regulation or URL.
 
 decisionMemo
   decisionQuestion: the single decision the founder faces, in one plain sentence, specific to this business.
   criticalAssumptions: up to 3. Each MUST come from the research: a question whose STATUS is NOT_FOUND,
-    PARTIAL or CONTRADICTORY (cite it in basedOnQuestions), or a finding that contradicts the founder's plan.
+    ANALOGOUS, PARTIAL or CONTRADICTORY (cite it in basedOnQuestions), or a finding that contradicts the founder's plan.
     Never write generic assumptions ("customers must pay", "the problem must be painful") — name the specific
     customer, behaviour, price, channel or rule at stake for THIS business.
-    evidenceStatus: SUPPORTED | PARTIAL | UNKNOWN | CONTRADICTED. evidence: what the findings say, or
-    "No evidence found in research". evidenceIds: the R#/F# used (required unless UNKNOWN).
+    evidenceStatus: SUPPORTED | PARTIAL | UNKNOWN | CONTRADICTED. evidence: what the findings say; for a question
+    that was NOT ESTABLISHED, say what was searched, the closest evidence and what it implies (from the brief) —
+    never a bare "no evidence". evidenceIds: the R#/F# used (required unless UNKNOWN).
     cheapestTest + experimentIndex: the matching experiment (1-5).
   proceedIf / changeModelIf: measurable conditions (numbers, thresholds, deadlines).
   evidenceStillRequired: every open question that matters, in plain words.
@@ -57,8 +62,8 @@ evidence (6–12 items): the key claims this report relies on, each tagged:
   FACT (only from a finding — cite R#) | FOUNDER (cite F#) | CALCULATION (from F#/R# numbers) |
   ASSUMPTION | HYPOTHESIS | INFERENCE. confidence: HIGH | MEDIUM | LOW. validation: how to check it.
 
-UNKNOWN is a correct, respected answer. A short report with real findings and honest unknowns is better
-than a long report of plausible guesses. Challenge the founder where findings contradict the plan.
+UNKNOWN is a correct, respected answer once research has been widened (the brief shows what was tried).
+A short report with real findings and honest unknowns is better than a long report of plausible guesses. Challenge the founder where findings contradict the plan.
 `;
 
 const PROVENANCE_BLOCK = `
@@ -535,12 +540,16 @@ EVIDENCE RULES
  * `existingResearch`: research already completed for this audit (e.g. a retry after the decision stage
  * failed) is reused instead of searching again. `onResearch` persists research as soon as it exists.
  */
-type RunAuditOpts = { existingResearch?: ResearchRecord | null; onResearch?: (r: ResearchRecord) => Promise<void>; budgetMs?: number; usage?: UsageContext };
+type RunAuditOpts = { existingResearch?: ResearchRecord | null; onResearch?: (r: ResearchRecord) => Promise<void>; budgetMs?: number; usage?: UsageContext; researchSpend?: EscalationOpts['spend'] };
 type RunAuditResult = { research: ResearchRecord; report: AuditReport; tokens?: { inputTokens: number; outputTokens: number }; provider: string };
-/** `stopAfter` (job runtime): return after the PLAN or RESEARCH checkpoint (report null) unless that stage was already done. */
+/**
+ * `stopAfter` (job runtime): return after the PLAN or RESEARCH checkpoint (report null) unless that stage was already
+ * done, or after ONE escalation round ('ESCALATE') while research escalation is incomplete.
+ */
+export type AuditStopAfter = 'PLAN' | 'RESEARCH' | 'ESCALATE';
 export async function runAudit(input: AuditInput, opts?: RunAuditOpts): Promise<RunAuditResult>;
-export async function runAudit(input: AuditInput, opts: RunAuditOpts & { stopAfter?: 'PLAN' | 'RESEARCH' }): Promise<Omit<RunAuditResult, 'report'> & { report: AuditReport | null }>;
-export async function runAudit(input: AuditInput, opts: RunAuditOpts & { stopAfter?: 'PLAN' | 'RESEARCH' } = {}): Promise<Omit<RunAuditResult, 'report'> & { report: AuditReport | null }> {
+export async function runAudit(input: AuditInput, opts: RunAuditOpts & { stopAfter?: AuditStopAfter }): Promise<Omit<RunAuditResult, 'report'> & { report: AuditReport | null }>;
+export async function runAudit(input: AuditInput, opts: RunAuditOpts & { stopAfter?: AuditStopAfter } = {}): Promise<Omit<RunAuditResult, 'report'> & { report: AuditReport | null }> {
   const start = Date.now();
   const deadline = start + (opts.budgetMs ?? AUDIT_BUDGET_MS);
   if (!process.env.GEMINI_API_KEY || !process.env.TAVILY_API_KEY) {
@@ -553,9 +562,9 @@ export async function runAudit(input: AuditInput, opts: RunAuditOpts & { stopAft
   const checkpoint = isPlanCheckpoint(opts.existingResearch) ? opts.existingResearch.plan : null;
   let research = opts.existingResearch?.version === 2 && !checkpoint ? opts.existingResearch : null;
   const reusedResearch = Boolean(research);
+  const facts = (input.founderFacts || []).filter((f) => f.locked);
+  const researchInput = { idea: input.idea, sector: input.sector, stage: input.stage, geography: input.geography, founderFactsText: facts.map((f) => `${f.id}: ${f.concept} ${f.timeframe} ${f.raw}`).join('\n') };
   if (!research) {
-    const facts = (input.founderFacts || []).filter((f) => f.locked);
-    const researchInput = { idea: input.idea, sector: input.sector, stage: input.stage, geography: input.geography, founderFactsText: facts.map((f) => `${f.id}: ${f.concept} ${f.timeframe} ${f.raw}`).join('\n') };
     // Job runtime step 1: plan only (durable checkpoint), then return.
     if (opts.stopAfter === 'PLAN' && !checkpoint) {
       const planned = await researchBusiness(researchInput, deadline, undefined, { onPlan: opts.onResearch, usage: opts.usage, planOnly: true });
@@ -564,8 +573,16 @@ export async function runAudit(input: AuditInput, opts: RunAuditOpts & { stopAft
     research = await researchBusiness(researchInput, deadline, undefined, { plan: checkpoint, onPlan: opts.onResearch, usage: opts.usage });
     if (opts.onResearch) await opts.onResearch(research);
   }
-  // Job runtime step 2: research (search + extract) complete and saved; the decision runs in the next step.
+  // Job runtime step 2: research (search + extract) complete and saved; escalation runs in the next step(s).
   if (opts.stopAfter && !reusedResearch) return { research, report: null, provider: 'aristotle-research-v2' };
+
+  // ESCALATE: an unanswered question is researched wider (research-escalation.ts) before anything is decided.
+  // The decision memo is never written on research that has not been escalated.
+  while (needsEscalation(research)) {
+    research = await escalateResearch(research, researchInput, deadline, { usage: opts.usage, spend: opts.researchSpend });
+    if (opts.onResearch) await opts.onResearch(research);
+    if (opts.stopAfter) return { research, report: null, provider: 'aristotle-research-v2' }; // one round per job step
+  }
   const answered = (research.questions || []).filter((q) => q.status === 'ANSWERED' || q.status === 'PARTIAL').length;
   console.log(JSON.stringify({ event: 'aristotle_research_complete', questions: research.questions?.length ?? 0, answered, sources: research.sources.length, findings: research.findings?.length ?? 0, ms: Date.now() - start }));
 

@@ -1,5 +1,6 @@
 // Aaira Books on REAL PostgreSQL through the real scope → order → verify → objective page flow.
 // Only Gemini/Tavily HTTP and cookies are faked. The decision model returns the reproduced bad rows/claims.
+import { escalationKind, escalationReply } from './helpers/escalation-fakes';
 import { describe, expect, it, vi } from 'vitest';
 
 const E2E = Boolean(process.env.HIPPO_E2E_DATABASE_URL && process.env.HIPPO_E2E_PRISMA_CLIENT && process.env.HIPPO_E2E_ADAPTER);
@@ -28,9 +29,9 @@ describe.skipIf(!E2E)('Aaira Books founder facts and claims (real Postgres)', ()
       const body = JSON.parse(String(init?.body || '{}'));
       if (url.includes('tavily')) return new Response(JSON.stringify({ results: [] }), { status: 200 });
       const prompt: string = body.contents[0].parts[0].text;
-      const k = prompt.includes('Restate what this founder') ? 'understand' : prompt.includes('research planner') ? 'plan' : 'decision';
+      const k = prompt.includes('Restate what this founder') ? 'understand' : prompt.includes('research planner') ? 'plan' : escalationKind(prompt) ?? 'decision';
       if (k === 'decision') decisionFacts = prompt;
-      const data = k === 'understand' ? { objective: 'Write a kids quiz book', target: '5,000 physical and 1,000 digital books', currentState: 'Not stated yet', keyQuestion: 'q', businessKind: 'NEW_IDEA' }
+      const data = k === 'escalate' || k === 'gap' || k === 'pathways' ? escalationReply(prompt) : k === 'understand' ? { objective: 'Write a kids quiz book', target: '5,000 physical and 1,000 digital books', currentState: 'Not stated yet', keyQuestion: 'q', businessKind: 'NEW_IDEA' }
         : k === 'plan' ? { businessModel: { summary: 'Kids quiz books', customer: 'Kids 8–15', payer: 'Parents', offering: 'Quiz books', revenueMechanism: 'Per copy', keyActivities: [], regulatedActivities: [] }, questions: ['a', 'b', 'c', 'd'].map((x) => ({ category: 'DEMAND', question: `Q ${x}?`, whyItMatters: 'x', query: `kids quiz books india ${x}` })) }
         : { ...deterministicAudit({ idea: AAIRA, sector: 'Edtech' }), oneLineVerdict: 'v', customer: { icp: 'Parents', problem: PROBLEM, willingnessToPay: 'Unknown' }, marketView: { marketType: 'Books', demandSignal: 'Unknown', competition: COMPETITION, marketRisk: 'Distribution' },
           // The reproduced bad output: an age row pointing at a sales target.

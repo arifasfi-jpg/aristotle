@@ -40,18 +40,28 @@ describe('Pathways: ambition kept, evidence grounded', () => {
   const raw = { goal: 'Reach 10,000 units/month', ambitionNote: 'Needs ~7x growth', combination: 'P1 + P2', founderChecklist: ['Working capital limit'], pathways: [
     { name: 'Pharmacy network', howItWorks: 'Sell through chemists', whyPlausible: 'Pharmacies already stock glucometers', evidence: [{ statement: 'Chemists stock glucometers', refs: ['R1'] }, { statement: 'Made up', refs: ['R9'] }], economics: 'Margin per unit ₹200 [F1]', constraints: ['Credit terms'], risks: ['Returns'], firstExperiment: 'Call 20 chemists', contributionToTarget: 'Needs 500 outlets × 6 units' },
     { name: 'D2C', howItWorks: 'Own website and ads', whyPlausible: 'Online demand', evidence: [], economics: 'CAC will be ₹350 and margin 55%', constraints: [], risks: [], firstExperiment: '₹5,000 ad test', contributionToTarget: 'Needs 3,000 orders/month' },
+    { name: 'US-style device subscription', lens: 'INTERNATIONAL_ANALOGUE', model: 'Monthly strip subscription with a free meter', customer: 'Diabetic households', valueProposition: 'Never run out of strips', revenueMechanism: 'Monthly subscription', whyPlausible: 'Works abroad', evidence: [{ statement: 'Strip subscriptions are common in the US (analogue)', refs: ['R2'] }], assumptions: ['Indian buyers accept auto-debit'], economics: 'Not yet established.', constraints: [], risks: ['Churn'], firstExperiment: 'Offer to 30 buyers', contributionToTarget: 'Needs 2,000 subscribers' },
   ] };
   it('drops evidence citing unknown refs, removes ungrounded numbers, keeps grounded ones', () => {
     const r = normalisePathways(raw, valid);
-    expect(r.pathways[0].evidence).toEqual([{ statement: 'Chemists stock glucometers', refs: ['R1'] }]);
+    expect(r.pathways[0].evidence).toEqual([{ statement: 'Chemists stock glucometers', refs: ['R1'], kind: 'DIRECT' }]);
     expect(r.pathways[0].evidenceStrength).toBe('PARTIAL');
     expect(r.pathways[0].economics).toContain('[F1]');
     expect(r.pathways[1].economics).toMatch(/^Not yet established\./);
     expect(r.pathways[1].evidenceStrength).toBe('NOT_YET_ESTABLISHED');
     expect(r.goal).toBe('Reach 10,000 units/month');
   });
-  it('refuses fewer than two usable pathways', () => {
-    expect(() => normalisePathways({ ...raw, pathways: [raw.pathways[0]] }, valid)).toThrow(/PATHWAYS_INVALID/);
+  it('refuses fewer than three usable pathways: a finished report always offers real alternatives', () => {
+    expect(() => normalisePathways({ ...raw, pathways: raw.pathways.slice(0, 2) }, valid)).toThrow(/PATHWAYS_INVALID/);
+  });
+  it('keeps one pathway per lens (materially different), never ranks, and labels analogue-only support', () => {
+    const r = normalisePathways(raw, { ...valid, analogous: new Set(['R2']) });
+    expect(r.pathways.map((p) => p.id)).toEqual(['P1', 'P2', 'P3']);
+    expect(r.pathways[2]).toMatchObject({ lens: 'INTERNATIONAL_ANALOGUE', customer: 'Diabetic households', revenueMechanism: 'Monthly subscription', assumptions: ['Indian buyers accept auto-debit'], evidenceStrength: 'ANALOGOUS' });
+    expect(r.pathways[2].evidence[0].kind).toBe('ANALOGOUS');
+    const dup = { ...raw, pathways: [...raw.pathways, { ...raw.pathways[2], name: 'Same lens again' }] };
+    expect(normalisePathways(dup, valid).pathways.map((p) => p.name)).not.toContain('Same lens again');
+    expect(JSON.stringify(r)).not.toMatch(/"rank"|best|worst/i);
   });
 });
 

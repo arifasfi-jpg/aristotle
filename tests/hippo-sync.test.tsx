@@ -138,6 +138,9 @@ describe.skipIf(!E2E)('Aristotle → Hippoturtle sync is idempotent (real Postgr
     // Retry path = existing verify route with only { auditId }: no Razorpay order, no signature, no charge.
     jar = new Map(); const { createSession } = await import('@/lib/session'); await createSession(user.id);
     vi.doMock('@/lib/ai', () => ({ runAudit: async () => ({ report: REPORT, research: RESEARCH, pricing: { computeInr: 1, marginInr: 0.1 }, provider: 'test' }) }));
+    // The audit job lays out pathways after the (stubbed) decision memo.
+    const { FAKE_PATHWAYS } = await import('./helpers/escalation-fakes');
+    vi.doMock('@/lib/hippo/gateway', async (orig) => ({ ...(await orig<typeof import('@/lib/hippo/gateway')>()), generateJson: async () => ({ data: FAKE_PATHWAYS, provider: 'gemini', model: 'test', task: 'pathways', inputTokens: 0, outputTokens: 0, costInr: 0, ms: 0 }) }));
     vi.resetModules();
     const { POST } = await import('@/app/api/payments/verify/route');
     const res = await POST(new Request('http://x', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ auditId: audit.id }) }));
@@ -147,7 +150,9 @@ describe.skipIf(!E2E)('Aristotle → Hippoturtle sync is idempotent (real Postgr
     expect(after).toMatchObject({ status: 'completed', paymentStatus: 'paid', paymentRef: 'pay_TEST123' }); // same payment, not charged again
     const svc = await import('@/lib/hippo/service');
     await Promise.all([svc.refreshObjective(objective), svc.refreshObjective(objective)]);
-    expect(await counts(objective.id, org.id)).toEqual(EXPECTED);
-    vi.doUnmock('@/lib/ai');
+    // + 3 pathway ideas in Business Memory: pathways arrive with the report, so the founder never sees a memo without them.
+    expect(await counts(objective.id, org.id)).toEqual({ ...EXPECTED, memory: EXPECTED.memory + 3 });
+    expect((await db.decisionMemo.findUnique({ where: { objectiveId: objective.id } })).pathways.pathways).toHaveLength(3);
+    vi.doUnmock('@/lib/ai'); vi.doUnmock('@/lib/hippo/gateway');
   });
 });

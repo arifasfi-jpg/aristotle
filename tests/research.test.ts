@@ -99,9 +99,12 @@ function fakeFetch(url: string, init?: RequestInit) {
     return new Response(JSON.stringify({ results }), { status: 200 });
   }
   const prompt: string = body.contents[0].parts[0].text;
-  const kind = prompt.includes('research planner') ? 'plan' : prompt.includes('You extract evidence for ONE research question') ? 'extract' : 'decision';
+  // Research escalation (follow-up query planning, gap explanations) is its own kind of call, never the decision.
+  const kind = prompt.includes('research planner') ? 'plan' : prompt.includes('You extract evidence for ONE research question') ? 'extract'
+    : prompt.includes('FOLLOW-UP web searches') ? 'escalate' : prompt.includes('Research could not settle') ? 'gap' : 'decision';
   calls.push({ kind, body });
   if (kind === 'decision' && decisionFails > 0) { decisionFails--; return new Response('overloaded', { status: 503 }); }
+  if (kind === 'escalate' || kind === 'gap') return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: '{}' }] } }], usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 50 } }), { status: 200 });
   const data = kind === 'plan' ? PLAN : kind === 'extract' ? extractFor(prompt) : decisionReport();
   return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(data) }] } }], usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 50 } }), { status: 200 });
 }
@@ -124,10 +127,11 @@ describe('1–2. Plan, then one targeted search per business-specific question',
     expect(research.businessModel).toMatchObject({ payer: 'The business owner', revenueMechanism: 'Monthly subscription' });
     expect(research.businessModel!.regulatedActivities[0].activity).toMatch(/GSTN APIs/);
     expect(research.questions!.map((q) => q.id)).toEqual(['Q1', 'Q2', 'Q3', 'Q4', 'Q5', 'Q6']); // duplicate query dropped
-    const tavily = calls.filter((c) => c.kind === 'tavily');
-    expect(tavily).toHaveLength(6);
-    expect(tavily.map((c) => c.body.query)).toEqual(research.queries);
+    // First pass: exactly one India search per planned question; escalation searches follow (see research-escalation.test.ts).
+    const tavily = calls.filter((c) => c.kind === 'tavily').slice(0, 6);
+    expect(tavily.map((c) => c.body.query)).toEqual(research.queries.slice(0, 6));
     expect(tavily.every((c) => c.body.search_depth === 'advanced' && c.body.country === 'india')).toBe(true);
+    expect(research.questions!.map((q) => q.attempts![0])).toEqual(research.questions!.map((q) => expect.objectContaining({ round: 0, strategy: 'INITIAL', query: q.query })));
     expect(tavily.every((c) => !c.body.query.includes(IDEA))).toBe(true); // never the founder's sentence as an exact phrase
     expect(tavily.find((c) => c.body.query.includes('Suvidha'))!.body.include_raw_content).toBe('text'); // regulation: full text
     expect(tavily.find((c) => c.body.query.includes('taxpayers'))!.body.include_raw_content).toBe(false);
@@ -166,9 +170,11 @@ describe('4. Decision analysis is fed research findings, and assumptions come fr
     await run();
     const prompt: string = calls.find((c) => c.kind === 'decision')!.body.contents[0].parts[0].text;
     expect(prompt).toContain('RESEARCH BRIEF');
-    expect(prompt).toContain('R2 (HIGH, from S2 — Zoho Books pricing): Zoho Books Standard costs ₹749/month');
+    expect(prompt).toContain('R2 (HIGH, DIRECT, from S2 — Zoho Books pricing): Zoho Books Standard costs ₹749/month');
     expect(prompt).toMatch(/Q4 \[CHANNEL\][\s\S]*STATUS: NOT_FOUND/);
-    expect(prompt).toContain('NO EVIDENCE FOUND');
+    // A gap reaches the decision only after widening, with what was searched and how to resolve it.
+    expect(prompt).not.toContain('NO EVIDENCE FOUND');
+    expect(prompt).toMatch(/Q4 \[CHANNEL\][\s\S]*RESEARCHED: \d+ searches[\s\S]*NOT ESTABLISHED FROM PUBLIC EVIDENCE[\s\S]*Cheapest way to find out \(EXPERIMENT\)/);
     expect(prompt).not.toContain('80% of MSMEs'); // rejected model "knowledge" never reaches the decision
   });
 

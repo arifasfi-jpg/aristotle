@@ -4,6 +4,7 @@
 //
 // Runs when HIPPO_E2E_DATABASE_URL (a disposable database with migrations applied) and HIPPO_E2E_PRISMA_CLIENT
 // (a driver-adapter build of this schema) + HIPPO_E2E_ADAPTER (@prisma/adapter-pg) are set; skipped otherwise.
+import { escalationKind, escalationReply } from './helpers/escalation-fakes';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 const E2E = Boolean(process.env.HIPPO_E2E_DATABASE_URL && process.env.HIPPO_E2E_PRISMA_CLIENT && process.env.HIPPO_E2E_ADAPTER);
@@ -30,8 +31,9 @@ const calls: string[] = [];
 function gemini(prompt: string): unknown {
   const k = prompt.includes('Restate what this founder') ? 'understand' : prompt.includes('research planner') ? 'plan_research' : prompt.includes('You extract evidence for ONE research question') ? 'extract'
     : prompt.includes('You are Aristotle, the strategy capability of Hippoturtle') ? 'pathways' : prompt.includes('Convert the founder\'s chosen pathways') ? 'work' : prompt.includes('Write a precise WORK BRIEF') ? 'brief'
-    : prompt.includes('executing a work item') ? 'execute' : prompt.includes('HONEST BROKER') ? 'compare' : 'decision';
+    : prompt.includes('executing a work item') ? 'execute' : prompt.includes('HONEST BROKER') ? 'compare' : escalationKind(prompt) ?? 'decision';
   calls.push(k);
+  if (k === 'escalate' || k === 'gap') return escalationReply(prompt); // research escalation: deterministic queries / gap texts
   switch (k) {
     case 'understand': return { objective: 'Grow glucometer sales from 1,400 to 10,000 units a month.', target: '10,000 units per month', currentState: '~1,400 units/month via IndiaMART and local pharmacies', keyQuestion: 'Which channels can add ~8,600 units a month, at what CAC and working capital?', businessKind: 'EXISTING_BUSINESS' };
     case 'plan_research': return { businessModel: { summary: 'Selling glucometers through B2B marketplaces and pharmacies', customer: 'People with diabetes', payer: 'Patients, pharmacies, distributors', offering: 'Glucometers and strips', revenueMechanism: 'Unit sales and strip repeat purchases', keyActivities: ['Distribution'], regulatedActivities: [{ activity: 'Selling medical devices', whyRegulated: 'Medical device rules' }] }, questions: [
@@ -125,7 +127,11 @@ describe.skipIf(!E2E)('Hippoturtle founder journey (real Postgres)', () => {
     let page = await html(pages.objective({ params: Promise.resolve({ id: objectiveId }) }));
     expect(page).toContain('What Aristotle researched');
     expect(page).toContain('Chemists are the main purchase point for home glucose monitors.');
-    expect(page).toContain('No evidence found — this is an open question');
+    // Unanswered questions were widened (7 searches) and are explained with the cheapest way to find out — no bare "no evidence".
+    expect(page).not.toContain('No evidence found');
+    expect(page).toContain('I couldn’t establish this from public evidence.');
+    expect(page).toMatch(/7 searches, widening from/);
+    expect(page).toContain('Cheapest way to find out');
     expect(page).toContain('How could we actually achieve');
     expect(await db.researchFinding.count({ where: { objectiveId } })).toBe(2);
     expect(await db.decisionMemo.count({ where: { objectiveId } })).toBe(1);

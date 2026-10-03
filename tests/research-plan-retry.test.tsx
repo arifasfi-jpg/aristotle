@@ -24,7 +24,8 @@ const kinds: string[] = [];
 
 describe.skipIf(!E2E)('Retry resumes from the saved research plan (real Postgres, real verify route)', () => {
   it('no re-plan, same payment, no Razorpay order, Aaira Books identity unchanged', async () => {
-    Object.assign(process.env, { GEMINI_API_KEY: 'g', TAVILY_API_KEY: 't', DEMO_MODE: 'true', VERCEL_ENV: 'preview' });
+    // Phase 2: a paid audit job spends under a budget, which needs the AiUsage ledger (on wherever DATABASE_URL is set).
+    Object.assign(process.env, { GEMINI_API_KEY: 'g', TAVILY_API_KEY: 't', DEMO_MODE: 'true', VERCEL_ENV: 'preview', HIPPO_USAGE_LEDGER: 'on' });
     const { deterministicAudit } = await import('@/lib/audit');
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body || '{}'));
@@ -52,7 +53,10 @@ describe.skipIf(!E2E)('Retry resumes from the saved research plan (real Postgres
 
     // First attempt: plan succeeds, every search fails → retryable failure, plan saved.
     const first = await verify.POST(post({ auditId: created.auditId, demo: true }));
-    expect(first.status).toBe(502);
+    // Phase 2 (intentional): verify returns 200 once the payment is recorded and the job is durable; the job's
+    // retryable failure is what marks the audit failed (and keeps the plan checkpoint), as before.
+    expect(first.status).toBe(200);
+    await (await import('@/lib/jobs')).settleDetached(); // Phase 2: the audit runs as a job after verify returns
     const afterFirst = await db.audit.findUnique({ where: { id: created.auditId } });
     expect(afterFirst).toMatchObject({ status: 'failed', paymentStatus: 'paid' });
     const checkpoint = JSON.parse((await db.projectFile.findFirst({ where: { auditId: created.auditId, path: 'research.json' } })).content);
@@ -63,6 +67,7 @@ describe.skipIf(!E2E)('Retry resumes from the saved research plan (real Postgres
     tavilyDown = false;
     const retry = await verify.POST(post({ auditId: created.auditId }));
     expect(retry.status).toBe(200);
+    await (await import('@/lib/jobs')).settleDetached(); // Phase 2: the audit runs as a job after verify returns
     expect(kinds.filter((k) => k === 'plan')).toHaveLength(1);
     const done = await db.audit.findUnique({ where: { id: created.auditId } });
     expect(done).toMatchObject({ status: 'completed', paymentStatus: 'paid', paymentRef: afterFirst.paymentRef });
@@ -80,6 +85,6 @@ describe.skipIf(!E2E)('Retry resumes from the saved research plan (real Postgres
     const pages = await Promise.all([1, 2].map(async () => renderToStaticMarkup(await Page({ params: Promise.resolve({ id: created.objectiveId }) }))));
     for (const html of pages) { expect(html).toContain('Aaira Books'); expect(html).toContain('What Aristotle researched'); }
     expect(await db.researchQuestion.count({ where: { objectiveId: created.objectiveId } })).toBe(6);
-    vi.unstubAllGlobals();
+    vi.unstubAllGlobals(); delete process.env.HIPPO_USAGE_LEDGER;
   }, 30_000);
 });

@@ -5,13 +5,15 @@ import JSZip from 'jszip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 type Row = Record<string, any>;
-const db = { users: new Map<string, Row>(), sessions: new Map<string, Row>(), audits: new Map<string, Row>(), files: [] as Row[] };
+const db = { users: new Map<string, Row>(), sessions: new Map<string, Row>(), audits: new Map<string, Row>(), files: [] as Row[], jobs: new Map<string, Row>() };
 let seq = 0;
 const nid = (p: string) => `${p}_${++seq}`;
 const matches = (row: Row, where: Row): boolean => Object.entries(where).every(([k, v]) => {
   if (k === 'OR') return (v as Row[]).some((w) => matches(row, w));
-  if (v && typeof v === 'object' && !(v instanceof Date)) { if ('not' in v) return row[k] !== v.not; if ('lt' in v) return row[k] < v.lt; }
-  return row[k] === v;
+  if (v && typeof v === 'object' && !(v instanceof Date)) {
+    if ('not' in v) return row[k] !== v.not; if ('lt' in v) return row[k] !== null && row[k] < v.lt; if ('lte' in v) return row[k] !== null && row[k] <= v.lte; if ('in' in v) return (v.in as unknown[]).includes(row[k]);
+  }
+  return (row[k] ?? null) === v;
 });
 const fileKey = (w: Row) => (f: Row) => f.auditId === w.auditId_path.auditId && f.path === w.auditId_path.path;
 
@@ -29,6 +31,16 @@ vi.mock('@/lib/db', () => ({
       findMany: async ({ where }: Row) => [...db.audits.values()].filter((x) => matches(x, where)),
       update: async ({ where, data }: Row) => { const a = db.audits.get(where.id)!; Object.assign(a, data, { updatedAt: new Date() }); return { ...a }; },
       updateMany: async ({ where, data }: Row) => { let count = 0; for (const a of db.audits.values()) if (matches(a, where)) { Object.assign(a, data, { updatedAt: new Date() }); count++; } return { count }; },
+    },
+    // Phase 2: the paid audit runs as a durable Job (in-memory stand-in for the Job table; same Prisma calls).
+    job: {
+      findUnique: async ({ where }: Row) => { const j = where.id ? db.jobs.get(where.id) : [...db.jobs.values()].find((x) => x.dedupeKey === where.dedupeKey); return j ? { ...j } : null; },
+      findUniqueOrThrow: async ({ where }: Row) => ({ ...db.jobs.get(where.id)! }),
+      findFirst: async ({ where }: Row) => { const j = [...db.jobs.values()].find((x) => matches(x, where)); return j ? { ...j } : null; },
+      findMany: async ({ where }: Row) => [...db.jobs.values()].filter((x) => matches(x, where)).map((x) => ({ ...x })),
+      create: async ({ data }: Row) => { const j = { id: nid('job'), status: 'QUEUED', progress: 'QUEUED', checkpoint: null, state: null, costInr: 0, reservedInr: 0, attempts: 0, maxAttempts: 3, lastError: null, waitingReason: null, runAfter: new Date(), leaseOwner: null, leaseUntil: null, cancelRequestedAt: null, organizationId: null, createdAt: new Date(), startedAt: null, completedAt: null, updatedAt: new Date(), ...data }; db.jobs.set(j.id, j); return { ...j }; },
+      update: async ({ where, data }: Row) => { const j = db.jobs.get(where.id)!; Object.assign(j, data, { updatedAt: new Date() }); return { ...j }; },
+      updateMany: async ({ where, data }: Row) => { let count = 0; for (const j of db.jobs.values()) if (matches(j, where)) { for (const [k, v] of Object.entries(data)) j[k] = v && typeof v === 'object' && 'increment' in (v as Row) ? j[k] + (v as Row).increment : v; j.updatedAt = new Date(); count++; } return { count }; },
     },
     projectFile: {
       findUnique: async ({ where }: Row) => db.files.find(fileKey(where)) ?? null,
@@ -56,7 +68,11 @@ vi.mock('@/lib/ai', () => ({ runAudit: (i: Row) => runAudit(i) }));
 const { POST: createAudit } = await import('@/app/api/audits/route');
 const { POST: scopeRoute } = await import('@/app/api/audits/[id]/scope/route');
 const { POST: createOrder } = await import('@/app/api/payments/create-order/route');
-const { POST: verify } = await import('@/app/api/payments/verify/route');
+const { POST: verifyRoute } = await import('@/app/api/payments/verify/route');
+// Phase 2: verification returns once the audit job is durable; the job runs after the response. The harness waits for
+// that background run so each test observes the finished audit, exactly as a founder refreshing the page later would.
+const { settleDetached } = await import('@/lib/jobs');
+const verify = async (r: Request) => { const res = await verifyRoute(r); await settleDetached(); return res; };
 const { GET: exportAudit } = await import('@/app/api/audits/[id]/export/route');
 const verifyModule = await import('@/app/api/payments/verify/route');
 const { default: AuditPage } = await import('@/app/audit/[id]/page');
@@ -77,7 +93,7 @@ const PHARMA = 'I want to launch a pharmacy SaaS at ₹1,499/month and target 20
 const GLUCO = 'Glucometer business: currently selling 1,400 units/month. Cost is ₹500 per item. Margin is 10–12%.';
 
 beforeEach(() => {
-  db.users.clear(); db.sessions.clear(); db.audits.clear(); db.files.length = 0; jar = new Map(); runAudit.mockClear(); rzOrders.clear();
+  db.users.clear(); db.sessions.clear(); db.audits.clear(); db.files.length = 0; db.jobs.clear(); jar = new Map(); runAudit.mockClear(); rzOrders.clear();
   for (const k of ['RAZORPAY_KEY_ID', 'RAZORPAY_KEY_SECRET', 'DEMO_MODE', 'VERCEL_ENV', 'GEMINI_API_KEY']) delete process.env[k];
   process.env.DEMO_MODE = 'true'; process.env.VERCEL_ENV = 'preview';
   vi.unstubAllGlobals();
@@ -209,7 +225,9 @@ describe('Payment safety', () => {
     await scope(id, { action: 'confirm', scope: 'GROWTH_PLAN', facts: s.body.facts, factsReviewed: true });
     await order(id);
     runAudit.mockImplementationOnce(async () => { throw new Error('GEMINI_ERROR: timeout'); });
-    expect((await call(verify(post({ auditId: id, demo: true })))).status).toBe(502);
+    // Phase 2 (intentional): verification succeeds once the job is durable (200, not 502); the engine failure is
+    // recorded on the job and shown on the audit page, exactly as before.
+    expect((await call(verify(post({ auditId: id, demo: true })))).status).toBe(200);
     expect(db.audits.get(id)).toMatchObject({ paymentStatus: 'paid', status: 'failed' });
     expect((await order(id)).status).toBe(409);                                   // no second payment
     expect((await call(verify(post({ auditId: id })))).status).toBe(200);          // retry, no payment payload
@@ -323,7 +341,8 @@ describe('Razorpay TEST/LIVE flow and recovery', () => {
     const id = await paidReadyAudit();
     const o = (await order(id)).body;
     runAudit.mockImplementationOnce(async () => { throw new Error('TAVILY_TIMEOUT'); });
-    expect((await call(verify(post({ auditId: id, razorpay_order_id: o.orderId, razorpay_payment_id: 'pay_9', razorpay_signature: sign(o.orderId, 'pay_9') })))).status).toBe(502);
+    // Phase 2 (intentional): 200 once the payment is verified and the job is durable; the failure is on the page.
+    expect((await call(verify(post({ auditId: id, razorpay_order_id: o.orderId, razorpay_payment_id: 'pay_9', razorpay_signature: sign(o.orderId, 'pay_9') })))).status).toBe(200);
     const html = await page(id);
     expect(html).toContain('Your payment was successful, but Aristotle could not complete the analysis yet.');
     expect(html).toContain('Retry Analysis');

@@ -1,5 +1,8 @@
 // Minimal Gemini structured-output client shared by the research planner, evidence extractor and
 // decision stage. Every call has an explicit timeout so the whole audit fits the serverless limit.
+// Errors are marked NOT_SENT / SENT (+ httpStatus, + measured usage when Gemini reported it) so the ledger can tell a
+// call that cost nothing from one that may have been billed (see accountFailure in ai-usage.ts).
+import { fetchFailurePhase, notSent, sent } from './ai-usage';
 
 /** Token counts as Gemini bills them: cached prompt tokens are a subset of inputTokens; thinking tokens are billed as output. */
 export type GeminiResult<T> = { data: T; inputTokens: number; outputTokens: number; cachedTokens: number; thinkingTokens: number; retries: number; model: string };
@@ -29,7 +32,7 @@ export function fastThinkingConfig(model: string): Record<string, unknown> | und
 
 export async function callGeminiJson<T>(opts: { prompt: string; schema: unknown; timeoutMs: number; maxOutputTokens: number; temperature?: number; label: string; fastThinking?: boolean; model?: string }): Promise<GeminiResult<T>> {
   const key = process.env.GEMINI_API_KEY;
-  if (!key) throw new Error('AI_ENGINE_NOT_CONFIGURED: GEMINI_API_KEY is missing');
+  if (!key) throw notSent(new Error('AI_ENGINE_NOT_CONFIGURED: GEMINI_API_KEY is missing'));
   const model = opts.model || geminiModel();
   const thinking = opts.fastThinking ? fastThinkingConfig(model) : undefined;
   const started = Date.now();
@@ -61,16 +64,17 @@ export async function callGeminiJson<T>(opts: { prompt: string; schema: unknown;
     }
   } catch (e) {
     const aborted = e instanceof Error && e.name === 'AbortError';
-    throw new Error(`GEMINI_ERROR (${opts.label}): ${aborted ? `timed out after ${Math.round(opts.timeoutMs / 1000)}s (model ${model})` : e instanceof Error ? e.message : String(e)}`);
+    const err = new Error(`GEMINI_ERROR (${opts.label}): ${aborted ? `timed out after ${Math.round(opts.timeoutMs / 1000)}s (model ${model})` : e instanceof Error ? e.message : String(e)}`, { cause: e });
+    throw aborted || fetchFailurePhase(e) === 'SENT' ? sent(err) : notSent(err);
   } finally {
     clearTimeout(timeout);
   }
   if (opts.fastThinking) console.log(JSON.stringify({ event: 'gemini_call', label: opts.label, model, ms: Date.now() - started, status: res.status }));
-  if (!res.ok) throw new Error(`GEMINI_ERROR (${opts.label}): HTTP ${res.status}: ${(await res.text()).slice(0, 400)}`);
+  if (!res.ok) throw sent(new Error(`GEMINI_ERROR (${opts.label}): HTTP ${res.status}: ${(await res.text()).slice(0, 400)}`), { httpStatus: res.status });
   const json = (await res.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[]; usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; cachedContentTokenCount?: number; thoughtsTokenCount?: number } };
   const u = json.usageMetadata || {};
   // A billed-but-unusable response still cost tokens: the error carries them so the ledger records the spend.
-  const billed = (e: Error) => Object.assign(e, { measured: { inputTokens: u.promptTokenCount || 0, outputTokens: u.candidatesTokenCount || 0, cachedTokens: u.cachedContentTokenCount || 0, reasoningTokens: u.thoughtsTokenCount || 0, retries } });
+  const billed = (e: Error) => sent(e, { measured: { inputTokens: u.promptTokenCount || 0, outputTokens: u.candidatesTokenCount || 0, cachedTokens: u.cachedContentTokenCount || 0, reasoningTokens: u.thoughtsTokenCount || 0, retries } });
   const text = json.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
   if (!text) throw billed(new Error(`GEMINI_ERROR (${opts.label}): empty response`));
   let data: T;

@@ -97,6 +97,7 @@ describe.skipIf(!E2E)('AI usage ledger + endpoint protection (real Postgres)', (
     expect((await json(r.scope.POST(req({ action: 'confirm', scope: 'GROWTH_PLAN', facts: sug.body.facts, factsReviewed: true }), ctx(auditId)))).status).toBe(200);
     expect((await json(r.order.POST(req({ auditId })))).body.demo).toBe(true);
     expect((await json(r.verify.POST(req({ auditId, demo: true })))).status).toBe(200);
+    await (await import('@/lib/jobs')).settleDetached(); // Phase 2: the audit runs as a job after verify returns
     expect((await json(r.explore.POST(req({ about: 'I cook well, have ₹10K and two free hours a day.' }, ip)))).status).toBe(200);
 
     // AI work execution (WORK purpose), on the same objective.
@@ -117,17 +118,19 @@ describe.skipIf(!E2E)('AI usage ledger + endpoint protection (real Postgres)', (
     const purposeOf = Object.fromEntries(rows.map((x: { task: string; purpose: string }) => [x.task, x.purpose]));
     expect(purposeOf).toMatchObject({ understand: 'ARISTOTLE', 'scope-classifier': 'ARISTOTLE', 'research-plan': 'RESEARCH', 'research-search': 'RESEARCH', 'research-extract': 'RESEARCH', decision: 'ARISTOTLE', explore: 'OPPORTUNITY', execute: 'WORK' });
 
-    // 3: rupee cost per actual model. Default model: migrated $0.20/$1.20; explore ran on the dearer tier-1 model.
+    // 3: rupee cost per actual model. Phase 1.1 contract change: the default model now carries its VERIFIED price
+    // ($0.30 in / $0.03 cached / $2.50 out — the Phase 1 seed of $0.20/$1.20 was wrong); outcome 'OK' is now 'SUCCESS'.
+    // The tier-1 fixture model has no verificationStatus, so it is UNVERIFIED and its cost is ESTIMATED.
     const cost = (inP: number, cachedP: number, outP: number) => ((1000 - 100) * inP + 100 * cachedP + (200 + 50) * outP) / 1e6 * 88;
     const decision = rows.find((x: { task: string }) => x.task === 'decision')!;
-    expect(decision).toMatchObject({ provider: 'gemini', model: 'gemini-3.5-flash-lite', priceSource: 'MODEL_PRICE', inputTokens: 1000, outputTokens: 200, reasoningTokens: 50, cachedTokens: 100, outcome: 'OK', usdInr: 88 });
-    expect(decision.costInr).toBeCloseTo(cost(0.2, 0.2, 1.2), 4);
+    expect(decision).toMatchObject({ provider: 'gemini', model: 'gemini-3.5-flash-lite', priceSource: 'VERIFIED_PRICE', costStatus: 'ACTUAL', inputTokens: 1000, outputTokens: 200, reasoningTokens: 50, cachedTokens: 100, outcome: 'SUCCESS', usdInr: 88 });
+    expect(decision.costInr).toBeCloseTo(cost(0.3, 0.03, 2.5), 4);
     const explore = rows.find((x: { task: string }) => x.task === 'explore')!;
-    expect(explore).toMatchObject({ model: 'gemini-premium-x', tier: 1, priceSource: 'MODEL_PRICE' });
+    expect(explore).toMatchObject({ model: 'gemini-premium-x', tier: 1, priceSource: 'UNVERIFIED_PRICE', costStatus: 'ESTIMATED' });
     expect(explore.costInr).toBeCloseTo(cost(2.5, 0.625, 15), 4);
     expect(geminiModels).toContain('gemini-premium-x');
     const search = rows.find((x: { kind: string }) => x.kind === 'SEARCH')!;
-    expect(search).toMatchObject({ provider: 'tavily', model: 'search', searchCalls: 1, searchCredits: 2, priceSource: 'MODEL_PRICE' });
+    expect(search).toMatchObject({ provider: 'tavily', model: 'search', searchCalls: 1, searchCredits: 2, priceSource: 'VERIFIED_PRICE', costStatus: 'ACTUAL' });
     expect(search.costInr).toBeCloseTo(2 * 0.008 * 88, 4);
 
     // Attribution: the audit's calls carry the audit + its owner; Hippo calls carry the objective / work.
@@ -143,12 +146,20 @@ describe.skipIf(!E2E)('AI usage ledger + endpoint protection (real Postgres)', (
     // 6: Aristotle behaviour unchanged — the report is produced and stored exactly as before.
     expect(audit.status).toBe('completed');
     expect(JSON.parse(audit.report).verdict).toBeTruthy();
+    // Phase 1.1 — one cost source: the audit's compute cost IS the ledger total for the audit; margin = 10% of it.
+    const ledgerSum = (await db.aiUsage.aggregate({ _sum: { costInr: true }, where: { auditId } }))._sum.costInr ?? 0;
+    expect(ledgerSum).toBeGreaterThan(0);
+    expect(audit.computePaise).toBe(Math.round(ledgerSum * 100));
+    expect(audit.marginPaise).toBe(Math.round(audit.computePaise * 0.1));
+    const bundle = JSON.parse((await db.projectFile.findUniqueOrThrow({ where: { auditId_path: { auditId, path: 'audit.json' } } })).content);
+    expect(bundle.pricing).toMatchObject({ computeInr: audit.computePaise / 100, marginInr: audit.marginPaise / 100, source: 'AI_USAGE_LEDGER' });
     // The execution's recorded actual cost is the ledger's per-model cost.
     const exec = await db.execution.findFirstOrThrow({ where: { workId: work.id } });
     expect(exec.costInr).toBeCloseTo(Math.round(rows.find((x: { task: string }) => x.task === 'execute')!.costInr * 100) / 100, 2);
   });
 
-  it('failed, timed-out and refused calls are recorded too; an unpriced model is flagged, not priced as another model', async () => {
+  it('failed, timed-out and refused calls are recorded too; a call that may have been billed is never booked at ₹0; an unpriced model is refused', async () => {
+    // Phase 1.1 contract change: Phase 1 booked failures at ₹0 and priced unknown models with an env fallback.
     const { db } = await import('@/lib/db');
     const { generateJson } = await import('@/lib/hippo/gateway');
     const { tavilySearch } = await import('@/lib/research');
@@ -161,18 +172,28 @@ describe.skipIf(!E2E)('AI usage ledger + endpoint protection (real Postgres)', (
     await expect(tavilySearch('q', { deep: false, timeoutMs: 5000 })).rejects.toThrow(/TAVILY_ERROR 500/);
     tavilyDown = false;
     process.env.HIPPO_TIER0_MODEL = 'gemini:gemini-never-priced';
+    const callsUnpriced = providerCalls.gemini;
+    await expect(generateJson('compare', 'Compare this quote.', {}, {}, { parentType: 'REQUEST' })).rejects.toThrow(/no ModelPrice/);
+    expect(providerCalls.gemini).toBe(callsUnpriced); // refused before the provider
+    process.env.HIPPO_ALLOW_UNPRICED_MODELS = 'true';
     await generateJson('compare', 'Compare this quote.', {}, {}, { parentType: 'REQUEST' });
-    delete process.env.HIPPO_TIER0_MODEL;
+    delete process.env.HIPPO_ALLOW_UNPRICED_MODELS; delete process.env.HIPPO_TIER0_MODEL;
     process.env.HIPPO_MAX_CALL_INR = '0.0001';
     const callsBefore = providerCalls.gemini;
     await expect(generateJson('execute', 'x'.repeat(1000), {}, {}, { parentType: 'REQUEST' })).rejects.toThrow(/AI_BUDGET_EXCEEDED/);
     expect(providerCalls.gemini).toBe(callsBefore); // refused BEFORE any provider call
     const rows = await db.aiUsage.findMany({ where: { createdAt: { gte: since } }, orderBy: { createdAt: 'asc' } });
-    expect(rows.map((x: { task: string; outcome: string; costInr: number }) => [x.task, x.outcome, x.costInr])).toEqual([
-      ['compare', 'ERROR', 0], ['compare', 'TIMEOUT', 0], ['research-search', 'ERROR', 0], ['compare', 'OK', expect.any(Number)], ['execute', 'REFUSED_BUDGET', 0],
+    expect(rows.map((x: { task: string; outcome: string; costStatus: string }) => [x.task, x.outcome, x.costStatus])).toEqual([
+      ['compare', 'PROVIDER_ERROR', 'ESTIMATED'], ['compare', 'TIMEOUT', 'ESTIMATED'], ['research-search', 'PROVIDER_ERROR', 'ESTIMATED'],
+      ['compare', 'REFUSED_BUDGET', 'NONE'], ['compare', 'SUCCESS', 'UNPRICED'], ['execute', 'REFUSED_BUDGET', 'NONE'],
     ]);
-    expect(rows[3]).toMatchObject({ model: 'gemini-never-priced', priceSource: 'UNPRICED_FALLBACK' });
-    expect(rows[4].estimatedInr).toBeGreaterThan(0.0001);
+    expect(rows[0].costInr).toBeGreaterThan(0);                     // HTTP error: input-only estimate
+    expect(rows[1].costInr).toBeGreaterThan(rows[0].costInr);        // timeout after send: whole worst case
+    expect(rows[1].costInr).toBeCloseTo(rows[1].estimatedInr ?? -1, 4);
+    expect(rows[2].costInr).toBeCloseTo(2 * 0.008 * 88, 4);          // a sent search costs its credits
+    expect(rows[4]).toMatchObject({ model: 'gemini-never-priced', priceSource: 'UNPRICED', costInr: 0 });
+    expect([rows[3].costInr, rows[5].costInr]).toEqual([0, 0]);
+    expect(rows[5].estimatedInr).toBeGreaterThan(0.0001);
   });
 
   it('4 + 5: explore is protected — cross-site refused, per-user and per-IP limits, platform free-tier cap', async () => {

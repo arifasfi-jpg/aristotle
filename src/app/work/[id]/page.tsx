@@ -6,6 +6,7 @@ import { routeCapability } from '@/lib/hippo/capabilities';
 import { guardMarketingClaims } from '@/lib/hippo/claims';
 import { HttpError, requireWork } from '@/lib/hippo/context';
 import { computeEstimates, LABELS, normaliseEffort } from '@/lib/hippo/costs';
+import { executionPrice } from '@/lib/hippo/gateway';
 import { isCustomerFacing, withAiProvenance, type QuoteComparison } from '@/lib/hippo/execution';
 import { workPaymentPlan } from '@/lib/hippo/payments';
 import { classifyInputs, INPUT_LABEL, proposedLabel, type BriefInput } from '@/lib/hippo/provenance';
@@ -44,7 +45,7 @@ export default async function WorkPage({ params }: { params: Promise<{ id: strin
   const modes = classification.modes;
   const effort = brief?.effort as EffortModel | undefined;
   // Briefs written before classification may lack an AI estimate; show the computed one (stored when chosen).
-  const aiFallback = brief && modes.includes('AI') && !estimates.some((e) => e.mode === 'AI') ? computeEstimates(normaliseEffort(effort, cap), cap, 3000, modes).find((e) => e.mode === 'AI') : undefined;
+  const aiFallback = brief && modes.includes('AI') && !estimates.some((e) => e.mode === 'AI') ? computeEstimates(normaliseEffort(effort, cap), cap, 3000, await executionPrice(), modes).find((e) => e.mode === 'AI') : undefined;
   const est = (m: string) => estimates.find((e) => e.mode === m) ?? (m === 'AI' && aiFallback ? { ...aiFallback, id: 'computed-ai' } : undefined);
   const shownEstimates = aiFallback ? [{ ...aiFallback, id: 'computed-ai' }, ...estimates] : estimates;
   const professional = classification.executionClass === 'AI_WITH_HUMAN_REVIEW' || classification.executionClass === 'PROFESSIONAL_APPROVAL';

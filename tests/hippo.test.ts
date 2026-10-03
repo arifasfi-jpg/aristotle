@@ -3,6 +3,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../src/lib/db', () => ({ db: {} }));
 import { allowedModes, CAPABILITIES, getCapability, routeCapability } from '../src/lib/hippo/capabilities';
 import { computeEstimates, normaliseEffort } from '../src/lib/hippo/costs';
+import type { Price } from '../src/lib/ai-usage';
+// Contract change (Phase 1.1): AI estimates take the routed model's ModelPrice; fixture = verified gemini-3.5-flash-lite.
+const PRICE: Price = { id: 'mp_gemini_3_5_flash_lite_v', inputUsdPerMTok: 0.3, outputUsdPerMTok: 2.5, cachedInputUsdPerMTok: 0.03, reasoningUsdPerMTok: 2.5, usdPerCredit: 0, currency: 'USD', status: 'VERIFIED_PRICE' };
+
 import { normaliseOutput, positionQuote } from '../src/lib/hippo/execution';
 import { activeProvider } from '../src/lib/hippo/gateway';
 import { normaliseBrief, normalisePlan } from '../src/lib/hippo/mogli';
@@ -77,7 +81,7 @@ describe('Cost intelligence is deterministic and labelled', () => {
   const cap = getCapability('marketing')!;
   it('AI cost from model rates + 10% margin; human/agency/hybrid labelled as benchmarks', () => {
     const effort = normaliseEffort({ aiFeasible: true, aiOutputTokens: 6000, specialist: 'Marketer', humanHours: { low: 8, high: 12 }, hourlyRateInr: { low: 500, high: 800 }, hybridReviewHours: { low: 1, high: 2 }, agencyMultiplier: { low: 1.5, high: 2 }, costDrivers: ['Revisions'], rateBasis: 'assumed freelance rate' }, cap);
-    const e = Object.fromEntries(computeEstimates(effort, cap, 4000).map((x) => [x.mode, x]));
+    const e = Object.fromEntries(computeEstimates(effort, cap, 4000, PRICE).map((x) => [x.mode, x]));
     expect(e.AI.label).toBe('COMPUTED');
     expect(e.AI.breakdown['Platform margin (₹)']).toBeCloseTo((e.AI.breakdown['AI / API cost (₹)'] as number) * 0.1, 2);
     expect([e.HUMAN.low, e.HUMAN.high]).toEqual([4000, 9600]);
@@ -87,12 +91,12 @@ describe('Cost intelligence is deterministic and labelled', () => {
   });
   it('without a rate there is no human figure at all (never invented)', () => {
     const effort = normaliseEffort({ humanHours: { low: 8, high: 12 }, hourlyRateInr: { low: 0, high: 0 } } as never, cap);
-    expect(computeEstimates(effort, cap, 1000).map((e) => e.mode)).toEqual(['AI']);
+    expect(computeEstimates(effort, cap, 1000, PRICE).map((e) => e.mode)).toEqual(['AI']);
   });
   it('regulated capability: no AI estimate', () => {
     const legal = getCapability('legal_regulatory')!;
     const effort = normaliseEffort({ aiFeasible: true, humanHours: { low: 2, high: 4 }, hourlyRateInr: { low: 2000, high: 4000 } } as never, legal);
-    expect(computeEstimates(effort, legal, 1000).map((e) => e.mode)).toEqual(['HUMAN', 'AGENCY', 'HYBRID']);
+    expect(computeEstimates(effort, legal, 1000, PRICE).map((e) => e.mode)).toEqual(['HUMAN', 'AGENCY', 'HYBRID']);
   });
   it('honest broker positions a quote against the benchmark', () => {
     expect(positionQuote(13500, { low: 8000, high: 12000 })).toMatchObject({ position: 'ABOVE', deltaPct: 35 });

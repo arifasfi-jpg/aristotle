@@ -67,7 +67,9 @@ async function decisionReport() {
 }
 
 beforeAll(() => {
-  Object.assign(process.env, { GEMINI_API_KEY: 'test', TAVILY_API_KEY: 'test', DEMO_MODE: 'true', VERCEL_ENV: 'preview' });
+  // Phase 1.1: like production (DATABASE_URL set → ledger on), ModelPrice is read from this real database; AI cost
+  // estimates come from it and there is no env fallback price any more.
+  Object.assign(process.env, { GEMINI_API_KEY: 'test', TAVILY_API_KEY: 'test', DEMO_MODE: 'true', VERCEL_ENV: 'preview', HIPPO_USAGE_LEDGER: 'on' });
   delete process.env.HIPPO_WORK_PAYMENTS;
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     const body = JSON.parse(String(init?.body || '{}'));
@@ -81,7 +83,7 @@ beforeAll(() => {
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(data) }] } }], usageMetadata: { promptTokenCount: 2000, candidatesTokenCount: 1500 } }), { status: 200 });
   }));
 });
-afterAll(() => vi.unstubAllGlobals());
+afterAll(() => { vi.unstubAllGlobals(); delete process.env.HIPPO_USAGE_LEDGER; });
 
 const req = (body: unknown = {}) => new Request('http://x', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 const ctx = (id: string) => ({ params: Promise.resolve({ id }) });
@@ -117,6 +119,7 @@ describe.skipIf(!E2E)('Hippoturtle founder journey (real Postgres)', () => {
     expect((await json(r.scope.POST(req({ action: 'confirm', scope: 'GROWTH_PLAN', facts: sug.body.facts, factsReviewed: true }), ctx(auditId)))).status).toBe(200);
     expect((await json(r.order.POST(req({ auditId })))).body.demo).toBe(true);
     expect((await json(r.verify.POST(req({ auditId, demo: true })))).status).toBe(200);
+    await (await import('@/lib/jobs')).settleDetached(); // Phase 2: the audit runs as a job after verify returns
 
     // 4–5. The objective page syncs research + decision memo into Hippoturtle tables.
     let page = await html(pages.objective({ params: Promise.resolve({ id: objectiveId }) }));

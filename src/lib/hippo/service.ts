@@ -12,7 +12,7 @@ import { classifyWork } from './work-classification';
 import { HttpError, isUniqueViolation, logActivity, memoryBrief, remember } from './context';
 import { computeEstimates, midpoint, normaliseEffort } from './costs';
 import { comparePrompt, COMPARE_SCHEMA, EXECUTE_SCHEMA, executePrompt, isCustomerFacing, normaliseOutput, positionQuote, rulesExplanation, withAiProvenance, type QuoteComparison } from './execution';
-import { aiMeta, generateJson, type GatewayResult } from './gateway';
+import { aiMeta, executionPrice, generateJson, type GatewayResult } from './gateway';
 import { BRIEF_SCHEMA, briefPrompt, normaliseBrief, normalisePlan, PLAN_SCHEMA, planPrompt, type BriefData } from './mogli';
 import { normalisePathways, PATHWAYS_SCHEMA, pathwaysPrompt } from './pathways';
 import { canExecuteNow, workPaymentPlan } from './payments';
@@ -212,7 +212,7 @@ export async function prepareBrief(ctx: { work: { id: string; organizationId: st
   const brief = normaliseBrief(r.data, cap, provenance);
   const effort = normaliseEffort(brief.effort as Partial<EffortModel>, cap);
   const promptTokens = Math.round((prompt.length + memory.length) / 4);
-  const estimates = computeEstimates(effort, cap, promptTokens, classification.modes);
+  const estimates = computeEstimates(effort, cap, promptTokens, await executionPrice(), classification.modes);
   let saved;
   try {
     saved = await db.workBrief.create({ data: { workId: work.id, objective: brief.objective, deliverable: brief.deliverable, inputs: json(brief.inputs), constraints: json(brief.constraints), successCriteria: json(brief.successCriteria), expectedOutput: brief.expectedOutput, outOfScope: json(brief.outOfScope), effort: json(effort), provider: r.provider, model: r.model } });
@@ -243,7 +243,7 @@ export async function chooseExecution(ctx: { work: { id: string; organizationId:
   if (choice === 'AI' && !estimate) {
     // Briefs written before work classification had no AI estimate when the model guessed "not AI-feasible".
     // The work's class allows AI, so compute the AI estimate from the stored effort (deterministic, labelled COMPUTED).
-    const ai = computeEstimates(normaliseEffort(briefRow.effort as Partial<EffortModel>, cap), cap, 3000, classification.modes).find((e) => e.mode === 'AI');
+    const ai = computeEstimates(normaliseEffort(briefRow.effort as Partial<EffortModel>, cap), cap, 3000, await executionPrice(), classification.modes).find((e) => e.mode === 'AI');
     if (ai) estimate = await db.costEstimate.create({ data: { workId: work.id, mode: 'AI', low: ai.low, high: ai.high, label: ai.label, basis: ai.basis, breakdown: json(ai.breakdown), drivers: json(ai.drivers) } });
   }
   if (choice === 'AI' && !estimate) throw new HttpError(400, 'AI cannot execute this work on its own.');

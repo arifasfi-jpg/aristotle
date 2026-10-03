@@ -1,5 +1,4 @@
 import type { Sector, AuditReport, ReportLanguage } from './audit';
-import { estimateCompute } from './pricing';
 import { buildFounderFactsBlock, FACT_CONCEPTS, type FounderFact } from './founder-facts';
 import { validateReport } from './report-validation';
 import type { Scope } from './routing';
@@ -536,7 +535,12 @@ EVIDENCE RULES
  * `existingResearch`: research already completed for this audit (e.g. a retry after the decision stage
  * failed) is reused instead of searching again. `onResearch` persists research as soon as it exists.
  */
-export async function runAudit(input: AuditInput, opts: { existingResearch?: ResearchRecord | null; onResearch?: (r: ResearchRecord) => Promise<void>; budgetMs?: number; usage?: UsageContext } = {}) {
+type RunAuditOpts = { existingResearch?: ResearchRecord | null; onResearch?: (r: ResearchRecord) => Promise<void>; budgetMs?: number; usage?: UsageContext };
+type RunAuditResult = { research: ResearchRecord; report: AuditReport; tokens?: { inputTokens: number; outputTokens: number }; provider: string };
+/** `stopAfter` (job runtime): return after the PLAN or RESEARCH checkpoint (report null) unless that stage was already done. */
+export async function runAudit(input: AuditInput, opts?: RunAuditOpts): Promise<RunAuditResult>;
+export async function runAudit(input: AuditInput, opts: RunAuditOpts & { stopAfter?: 'PLAN' | 'RESEARCH' }): Promise<Omit<RunAuditResult, 'report'> & { report: AuditReport | null }>;
+export async function runAudit(input: AuditInput, opts: RunAuditOpts & { stopAfter?: 'PLAN' | 'RESEARCH' } = {}): Promise<Omit<RunAuditResult, 'report'> & { report: AuditReport | null }> {
   const start = Date.now();
   const deadline = start + (opts.budgetMs ?? AUDIT_BUDGET_MS);
   if (!process.env.GEMINI_API_KEY || !process.env.TAVILY_API_KEY) {
@@ -551,9 +555,17 @@ export async function runAudit(input: AuditInput, opts: { existingResearch?: Res
   const reusedResearch = Boolean(research);
   if (!research) {
     const facts = (input.founderFacts || []).filter((f) => f.locked);
-    research = await researchBusiness({ idea: input.idea, sector: input.sector, stage: input.stage, geography: input.geography, founderFactsText: facts.map((f) => `${f.id}: ${f.concept} ${f.timeframe} ${f.raw}`).join('\n') }, deadline, undefined, { plan: checkpoint, onPlan: opts.onResearch, usage: opts.usage });
+    const researchInput = { idea: input.idea, sector: input.sector, stage: input.stage, geography: input.geography, founderFactsText: facts.map((f) => `${f.id}: ${f.concept} ${f.timeframe} ${f.raw}`).join('\n') };
+    // Job runtime step 1: plan only (durable checkpoint), then return.
+    if (opts.stopAfter === 'PLAN' && !checkpoint) {
+      const planned = await researchBusiness(researchInput, deadline, undefined, { onPlan: opts.onResearch, usage: opts.usage, planOnly: true });
+      return { research: planned, report: null, provider: 'aristotle-research-v2' };
+    }
+    research = await researchBusiness(researchInput, deadline, undefined, { plan: checkpoint, onPlan: opts.onResearch, usage: opts.usage });
     if (opts.onResearch) await opts.onResearch(research);
   }
+  // Job runtime step 2: research (search + extract) complete and saved; the decision runs in the next step.
+  if (opts.stopAfter && !reusedResearch) return { research, report: null, provider: 'aristotle-research-v2' };
   const answered = (research.questions || []).filter((q) => q.status === 'ANSWERED' || q.status === 'PARTIAL').length;
   console.log(JSON.stringify({ event: 'aristotle_research_complete', questions: research.questions?.length ?? 0, answered, sources: research.sources.length, findings: research.findings?.length ?? 0, ms: Date.now() - start }));
 
@@ -572,5 +584,6 @@ export async function runAudit(input: AuditInput, opts: { existingResearch?: Res
   const inputTokens = decision.inputTokens + (reusedResearch ? 0 : research.usage?.inputTokens ?? 0);
   const outputTokens = decision.outputTokens + (reusedResearch ? 0 : research.usage?.outputTokens ?? 0);
   console.log(JSON.stringify({ event: 'aristotle_audit_complete', inputTokens, outputTokens, ms: Date.now() - start }));
-  return { research, report, pricing: estimateCompute(inputTokens, outputTokens), provider: 'aristotle-research-v2' };
+  // No cost is computed here: the audit's compute cost is the AiUsage ledger sum for this audit (see auditCostInr).
+  return { research, report, tokens: { inputTokens, outputTokens }, provider: 'aristotle-research-v2' };
 }

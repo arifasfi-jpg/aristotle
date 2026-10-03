@@ -6,6 +6,10 @@ import { describe, expect, it } from 'vitest';
 import { CAPABILITIES, getCapability, STUDIO_TOOLS } from '../src/lib/hippo/capabilities';
 import { guardMarketingClaims, TESTIMONIAL_PLACEHOLDER } from '../src/lib/hippo/claims';
 import { computeEstimates, normaliseEffort } from '../src/lib/hippo/costs';
+import type { Price } from '../src/lib/ai-usage';
+// Contract change (Phase 1.1): AI estimates take the routed model's ModelPrice; fixture = verified gemini-3.5-flash-lite.
+const PRICE: Price = { id: 'mp_gemini_3_5_flash_lite_v', inputUsdPerMTok: 0.3, outputUsdPerMTok: 2.5, cachedInputUsdPerMTok: 0.03, reasoningUsdPerMTok: 2.5, usdPerCredit: 0, currency: 'USD', status: 'VERIFIED_PRICE' };
+
 import { AI_PROVENANCE_MARKER, executePrompt, withAiProvenance } from '../src/lib/hippo/execution';
 import { briefPrompt, normalisePlan, planPrompt, type BriefData } from '../src/lib/hippo/mogli';
 import type { ProvenanceContext } from '../src/lib/hippo/provenance';
@@ -109,9 +113,9 @@ describe('Execution classification: the deliverable decides, not a later human s
   it('cost estimates follow the work’s modes: an AI estimate whenever AI may execute, none for human/professional acts', () => {
     const cap = getCapability('marketing')!;
     const effort = normaliseEffort({ aiFeasible: false, humanHours: { low: 4, high: 6 }, hourlyRateInr: { low: 500, high: 800 } } as never, cap); // model said "not AI-feasible"
-    expect(computeEstimates(effort, cap, 2000, classifyWork(w('Create a brochure', 'Brochure')).modes).map((e) => e.mode)).toContain('AI');
+    expect(computeEstimates(effort, cap, 2000, PRICE, classifyWork(w('Create a brochure', 'Brochure')).modes).map((e) => e.mode)).toContain('AI');
     const legal = getCapability('legal_regulatory')!;
-    expect(computeEstimates(normaliseEffort(effort, legal), legal, 2000, classifyWork(w('Sign the lease deed', 'Signed deed')).modes).map((e) => e.mode)).not.toContain('AI');
+    expect(computeEstimates(normaliseEffort(effort, legal), legal, 2000, PRICE, classifyWork(w('Sign the lease deed', 'Signed deed')).modes).map((e) => e.mode)).not.toContain('AI');
   });
 });
 

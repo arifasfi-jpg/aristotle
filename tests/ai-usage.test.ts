@@ -10,7 +10,8 @@ import { clientIp, guardIp, hashIp, sameOrigin } from '../src/lib/rate-limit';
 const env = { ...process.env };
 afterEach(() => { process.env = { ...env }; });
 
-const price = (p: Partial<Price>): Price => ({ id: 'x', inputUsdPerMTok: 0, outputUsdPerMTok: 0, cachedInputUsdPerMTok: 0, usdPerCredit: 0, source: 'MODEL_PRICE', ...p });
+// Contract change (Phase 1.1): Price carries an explicit reasoning rate, currency and verification status.
+const price = (p: Partial<Price>): Price => ({ id: 'x', inputUsdPerMTok: 0, outputUsdPerMTok: 0, cachedInputUsdPerMTok: 0, reasoningUsdPerMTok: p.outputUsdPerMTok ?? 0, usdPerCredit: 0, currency: 'USD', status: 'VERIFIED_PRICE', ...p });
 
 describe('Rupee cost per actual model', () => {
   it('the same tokens cost different amounts on different models (no single global rate)', () => {
@@ -40,7 +41,7 @@ describe('Rupee cost per actual model', () => {
     expect(outcomeOf(new Error('TAVILY_TIMEOUT after 15s'))).toBe('TIMEOUT');
     expect(outcomeOf(new Error('GEMINI_ERROR (x): response was not valid JSON (possibly truncated)'))).toBe('INVALID_OUTPUT');
     expect(outcomeOf(new Error('AI_BUDGET_EXCEEDED: cap'))).toBe('REFUSED_BUDGET');
-    expect(outcomeOf(new Error('GEMINI_ERROR (x): HTTP 503'))).toBe('ERROR');
+    expect(outcomeOf(Object.assign(new Error('GEMINI_ERROR (x): HTTP 503'), { httpStatus: 503 }))).toBe('PROVIDER_ERROR'); // taxonomy renamed in 1.1
   });
 });
 

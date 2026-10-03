@@ -20,7 +20,8 @@ const COMPETITION = 'Established publishers lack direct personalization or local
 
 describe.skipIf(!E2E)('Aaira Books founder facts and claims (real Postgres)', () => {
   it('new audit: founder age 10, audience 8–15, 5,000 physical / 1,000 digital; no age in unit economics; unsupported claims labelled', async () => {
-    Object.assign(process.env, { GEMINI_API_KEY: 'g', TAVILY_API_KEY: 't', DEMO_MODE: 'true', VERCEL_ENV: 'preview' });
+    // Phase 2: a paid audit job spends under a budget, which needs the AiUsage ledger (on wherever DATABASE_URL is set).
+    Object.assign(process.env, { GEMINI_API_KEY: 'g', TAVILY_API_KEY: 't', DEMO_MODE: 'true', VERCEL_ENV: 'preview', HIPPO_USAGE_LEDGER: 'on' });
     const { deterministicAudit } = await import('@/lib/audit');
     let decisionFacts = '';
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
@@ -54,6 +55,7 @@ describe.skipIf(!E2E)('Aaira Books founder facts and claims (real Postgres)', ()
     await scope.POST(post({ action: 'confirm', scope: 'NEW_IDEA', facts: sug.facts, factsReviewed: true }), ctx(created.auditId));
     await (await import('@/app/api/payments/create-order/route')).POST(post({ auditId: created.auditId }));
     expect((await (await import('@/app/api/payments/verify/route')).POST(post({ auditId: created.auditId, demo: true }))).status).toBe(200);
+    await (await import('@/lib/jobs')).settleDetached(); // Phase 2: the audit runs as a job after verify returns
 
     // The decision model was told what each number means.
     expect(decisionFacts).toContain('Founder age: 10 years');
@@ -81,7 +83,7 @@ describe.skipIf(!E2E)('Aaira Books founder facts and claims (real Postgres)', ()
     expect(page).toContain('This problem occurs daily.');
     const memory = await db.businessMemory.findMany({ where: { objectiveId: created.objectiveId, status: 'FOUNDER_STATED', kind: 'FACT' }, select: { title: true } });
     expect(memory.map((m: { title: string }) => m.title).sort()).toEqual(['Founder age: 10 years', 'Target audience age (kids): 8–15 years', 'Target volume: 1,000 digital books', 'Target volume: 5,000 physical books']);
-    vi.unstubAllGlobals();
+    vi.unstubAllGlobals(); delete process.env.HIPPO_USAGE_LEDGER;
   }, 30_000);
 
   it('report stored BEFORE this fix ("Founder age | 5,000 | Founder stated") is corrected on display', async () => {

@@ -142,6 +142,7 @@ describe.skipIf(!E2E)('Aristotle → Hippoturtle sync is idempotent (real Postgr
     const { POST } = await import('@/app/api/payments/verify/route');
     const res = await POST(new Request('http://x', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ auditId: audit.id }) }));
     expect(res.status).toBe(200);
+    await (await import('@/lib/jobs')).settleDetached(); // Phase 2: the audit runs as a job after verify returns
     const after = await db.audit.findUnique({ where: { id: audit.id } });
     expect(after).toMatchObject({ status: 'completed', paymentStatus: 'paid', paymentRef: 'pay_TEST123' }); // same payment, not charged again
     const svc = await import('@/lib/hippo/service');

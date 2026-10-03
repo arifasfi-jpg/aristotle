@@ -1,7 +1,9 @@
 // Model gateway + router. Hippoturtle code asks for a TASK, never a provider or model: the router picks the model,
 // and every call (model or search) is metered into the AiUsage ledger with that model's own price.
 // Server-only (keys never reach the browser).
-import { AiBudgetError, callCeilingInr, freeDailyCapInr, maxCallCostInr, metered, priceFor, recordUsage, spentTodayInr, type CallSpec, type ModelTier, type UsageContext, type UsagePurpose } from '../ai-usage';
+import { AiBudgetError, allowUnpriced, ledgerEnabled, callCeilingInr, freeDailyCapInr, metered, modelCallEstimate, priceFor, recordUsage, releaseReservation, reserveBudget, searchCallEstimate, spentTodayInr, UNPRICED, type CallEstimate, type CallSpec, type ModelTier, type Price, type UsageContext, type UsagePurpose } from '../ai-usage';
+import { budgetStatus, decideNext, type GovernorDecision } from '../cost-governor';
+import { fetchFailurePhase, sent } from '../ai-usage';
 import { callGeminiJson, cleanJson, geminiModel, type GeminiResult } from '../gemini';
 
 export type AiProvider = 'gemini' | 'openai' | 'anthropic';
@@ -69,6 +71,12 @@ export function activeProvider(): { provider: AiProvider; model: string } | null
   return null;
 }
 
+/** ModelPrice of the model that would execute WORK today (used for AI cost estimates; same price the ledger uses). */
+export async function executionPrice(): Promise<Price> {
+  const m = routeModel(TASK_ROUTE.execute.tier);
+  return m ? priceFor(m.provider, m.model) : UNPRICED;
+}
+
 export type GatewayResult<T> = { data: T; provider: AiProvider; model: string; task: AiTask; inputTokens: number; outputTokens: number; costInr: number; ms: number };
 
 export class AiNotConfiguredError extends Error { constructor() { super('AI_ENGINE_NOT_CONFIGURED: no AI provider key is configured'); } }
@@ -78,10 +86,11 @@ async function fetchJson(url: string, init: RequestInit, timeoutMs: number, labe
   const t = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, { ...init, signal: controller.signal });
-    if (!res.ok) throw new Error(`AI_ERROR (${label}): HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    if (!res.ok) throw sent(new Error(`AI_ERROR (${label}): HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`), { httpStatus: res.status });
     return await res.json();
   } catch (e) {
-    if (e instanceof Error && e.name === 'AbortError') throw new Error(`AI_ERROR (${label}): timed out`);
+    if (e instanceof Error && e.name === 'AbortError') throw sent(new Error(`AI_ERROR (${label}): timed out`));
+    if (e instanceof Error && !(e as { providerPhase?: string }).providerPhase) Object.assign(e, { providerPhase: fetchFailurePhase(e) });
     throw e;
   } finally { clearTimeout(t); }
 }
@@ -90,22 +99,60 @@ function parse<T>(text: string, label: string): T {
   try { return JSON.parse(cleanJson(text)) as T; } catch { throw new Error(`AI_ERROR (${label}): response was not valid JSON`); }
 }
 
-/** Refuses (and records) a call whose worst case exceeds the per-call ceiling, or a free-tier call over today's cap. */
-async function guard(spec: CallSpec, free: boolean, promptChars: number, maxOutputTokens: number, context?: UsageContext) {
+/** A refusal by the cost governor; `governor` carries the decision, state and amounts for the caller / founder. */
+export class CostGovernorError extends AiBudgetError {
+  constructor(detail: string, readonly governor: GovernorDecision | null) { super(detail); }
+}
+
+/**
+ * Runs before every provider call. Refuses (and records, at ₹0 / NONE) a call that:
+ *   - has no price and unpriced models are not allowed (it could not be budgeted),
+ *   - could exceed the platform per-call ceiling (HIPPO_MAX_CALL_INR),
+ *   - is a free-tier call and today's free-tier cap is spent,
+ *   - would take its budget scope (audit / work / job) over its cumulative limit (cost-governor decideNext).
+ * On ALLOW, the call's worst case is reserved against the scope until the call is recorded.
+ */
+async function guard(spec: CallSpec, free: boolean, estimateFor: (p: Price) => CallEstimate, context?: UsageContext): Promise<{ price: Price; estimate: CallEstimate; release: () => Promise<void> }> {
   const price = await priceFor(spec.provider, spec.model);
-  const worst = maxCallCostInr(promptChars, maxOutputTokens, price);
-  let refusal: string | null = worst > callCeilingInr() ? `call ceiling ₹${callCeilingInr()} < worst case ₹${worst.toFixed(2)} for ${spec.provider}/${spec.model}` : null;
+  const estimate = estimateFor(price);
+  const worst = estimate.worstInr;
+  let refusal: string | null = null;
+  let governor: GovernorDecision | null = null;
+  // With no database there is no ledger and no ModelPrice table (local runs / unit tests): nothing is recorded, so an
+  // unpriced call is not refused there — but a budgeted call always needs the ledger.
+  if (context?.budget && !ledgerEnabled()) refusal = 'budget ledger unavailable: a budgeted call needs the AiUsage ledger';
+  else if (price.status === 'UNPRICED' && ledgerEnabled() && (!allowUnpriced() || context?.budget)) refusal = `no ModelPrice for ${spec.provider}/${spec.model}: the call cannot be budgeted`;
+  if (!refusal && worst > callCeilingInr()) refusal = `call ceiling ₹${callCeilingInr()} < worst case ₹${worst.toFixed(2)} for ${spec.provider}/${spec.model}`;
   if (!refusal && free) {
     try {
       const spent = await spentTodayInr(FREE_TASKS);
       if (spent >= freeDailyCapInr()) refusal = `free-tier daily cap ₹${freeDailyCapInr()} reached (₹${spent.toFixed(2)} spent today)`;
     } catch (e) { console.error(JSON.stringify({ event: 'free_cap_check_failed', error: e instanceof Error ? e.message : String(e) })); }
   }
-  if (refusal) {
-    await recordUsage({ ...spec, costInr: 0, estimatedInr: worst, price, durationMs: 0, outcome: 'REFUSED_BUDGET', error: refusal, context });
-    throw new AiBudgetError(refusal);
+  let release: () => Promise<void> = async () => undefined;
+  const b = context?.budget?.scope;
+  if (b && ((context?.parentType && context.parentType !== b.type) || (context?.parentId && context.parentId !== b.id))) {
+    throw new Error(`COST_GOVERNOR_MISCONFIGURED: usage parent ${context?.parentType}:${context?.parentId} is not budget scope ${b.type}:${b.id}`);
   }
-  return worst;
+  if (!refusal && context?.budget) {
+    // A budgeted call is never made blind: if the ledger cannot be read or written, the call is refused (fail closed).
+    // Check + reserve happen in ONE Postgres transaction serialised per scope (see reserveBudget).
+    const policy = context.budget;
+    try {
+      const r = await reserveBudget(policy.scope, worst, { ...spec, priceId: price.id, priceStatus: price.status }, context, (spent, reserved) => {
+        const d = decideNext(policy, budgetStatus(policy, spent, reserved), worst);
+        return { allow: d.decision === 'ALLOW', decision: d };
+      });
+      governor = r.decision;
+      if (r.reservationId) { const id = r.reservationId; release = () => releaseReservation(id); }
+      else refusal = `${governor.decision} [${governor.state}]: ${governor.reason}`;
+    } catch (e) { refusal = `budget ledger unavailable: ${e instanceof Error ? e.message : String(e)}`; }
+  }
+  if (refusal) {
+    await recordUsage({ ...spec, costInr: 0, costStatus: 'NONE', estimatedInr: worst, price, durationMs: 0, outcome: 'REFUSED_BUDGET', error: refusal, context });
+    throw new CostGovernorError(refusal, governor);
+  }
+  return { price, estimate, release };
 }
 
 export async function generateJson<T>(task: AiTask, prompt: string, schema: unknown, overrides: Partial<(typeof TASK_CONFIG)[AiTask]> = {}, usage?: UsageContext): Promise<GatewayResult<T>> {
@@ -114,7 +161,7 @@ export async function generateJson<T>(task: AiTask, prompt: string, schema: unkn
   if (!active) throw new AiNotConfiguredError();
   const cfg = { ...TASK_CONFIG[task], ...overrides };
   const spec: CallSpec = { kind: 'MODEL', purpose: route.purpose, task, tier: route.tier, provider: active.provider, model: active.model };
-  const worst = await guard(spec, Boolean(route.free), prompt.length + JSON.stringify(schema).length, cfg.maxOutputTokens, usage);
+  const g = await guard(spec, Boolean(route.free), (p) => modelCallEstimate(prompt.length + JSON.stringify(schema).length, cfg.maxOutputTokens, p), usage);
 
   const { result: data, costInr, measured, durationMs } = await metered<T>(spec, usage, async () => {
     if (active.provider === 'gemini') {
@@ -129,7 +176,7 @@ export async function generateJson<T>(task: AiTask, prompt: string, schema: unkn
       }, cfg.timeoutMs, `hippo:${task}`);
       // completion_tokens already include reasoning tokens (billed as output); cached tokens are part of prompt_tokens.
       const measured = { inputTokens: j.usage?.prompt_tokens || 0, outputTokens: j.usage?.completion_tokens || 0, cachedTokens: j.usage?.prompt_tokens_details?.cached_tokens || 0 };
-      try { return { result: parse<T>(j.choices?.[0]?.message?.content || '', task), measured }; } catch (e) { throw Object.assign(e as Error, { measured }); }
+      try { return { result: parse<T>(j.choices?.[0]?.message?.content || '', task), measured }; } catch (e) { throw sent(e as Error, { measured }); }
     }
     const j = await fetchJson('https://api.anthropic.com/v1/messages', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.ANTHROPIC_API_KEY!, 'anthropic-version': '2023-06-01' },
@@ -139,8 +186,8 @@ export async function generateJson<T>(task: AiTask, prompt: string, schema: unkn
     // Anthropic reports cache reads/writes separately from input_tokens; the ledger counts all prompt tokens as input.
     const cacheRead = j.usage?.cache_read_input_tokens || 0;
     const measured = { inputTokens: (j.usage?.input_tokens || 0) + cacheRead + (j.usage?.cache_creation_input_tokens || 0), outputTokens: j.usage?.output_tokens || 0, cachedTokens: cacheRead };
-    try { return { result: parse<T>((j.content || []).map((c: { text?: string }) => c.text || '').join(''), task), measured }; } catch (e) { throw Object.assign(e as Error, { measured }); }
-  }, worst);
+    try { return { result: parse<T>((j.content || []).map((c: { text?: string }) => c.text || '').join(''), task), measured }; } catch (e) { throw sent(e as Error, { measured }); }
+  }, g.estimate, g.price, g.release);
   return { data, provider: active.provider, model: active.model, task, inputTokens: measured.inputTokens ?? 0, outputTokens: measured.outputTokens ?? 0, costInr: Math.round(costInr * 100) / 100, ms: durationMs };
 }
 
@@ -152,20 +199,24 @@ export async function aristotleGeminiJson<T>(task: AristotleTask, opts: Paramete
   const route = TASK_ROUTE[task];
   const model = opts.model || geminiModel();
   const spec: CallSpec = { kind: 'MODEL', purpose: route.purpose, task, tier: route.tier, provider: 'gemini', model };
-  const worst = await guard(spec, Boolean(route.free), opts.prompt.length + JSON.stringify(opts.schema).length, opts.maxOutputTokens, usage);
+  const g = await guard(spec, Boolean(route.free), (p) => modelCallEstimate(opts.prompt.length + JSON.stringify(opts.schema).length, opts.maxOutputTokens, p), usage);
   const { result } = await metered<GeminiResult<T>>(spec, usage, async () => {
     const r = await callGeminiJson<T>({ ...opts, model });
     return { result: r, measured: { inputTokens: r.inputTokens, outputTokens: r.outputTokens, cachedTokens: r.cachedTokens, reasoningTokens: r.thinkingTokens, retries: r.retries } };
-  }, worst);
+  }, g.estimate, g.price, g.release);
   return result;
 }
 
-/** One web-search request, metered by credits (Tavily: basic = 1, advanced = 2). Failed requests are recorded at no cost. */
+/**
+ * One web-search request, budget-checked and metered by credits (Tavily: basic = 1, advanced = 2). Search cost stays
+ * visible in the ledger (kind SEARCH). A request that was sent and failed is booked at its credits (ESTIMATED).
+ */
 export async function meteredSearch<T>(opts: { provider: 'tavily'; depth: 'basic' | 'advanced'; task?: 'research-search' }, usage: UsageContext | undefined, run: () => Promise<T>): Promise<T> {
   const task = opts.task ?? 'research-search';
   const credits = opts.depth === 'advanced' ? 2 : 1;
   const spec: CallSpec = { kind: 'SEARCH', purpose: TASK_ROUTE[task].purpose, task, tier: TASK_ROUTE[task].tier, provider: opts.provider, model: 'search' };
-  const { result } = await metered<T>(spec, usage, async () => ({ result: await run(), measured: { searchCalls: 1, searchCredits: credits } }));
+  const g = await guard(spec, false, (p) => searchCallEstimate(credits, p), usage);
+  const { result } = await metered<T>(spec, usage, async () => ({ result: await run(), measured: { searchCalls: 1, searchCredits: credits } }), g.estimate, g.price, g.release);
   return result;
 }
 

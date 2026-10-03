@@ -16,6 +16,7 @@ model User {
   sessions  Session[]
   audits    Audit[]
   founder   Founder?
+  jobs      Job[]
 }
 
 model Session {
@@ -381,12 +382,13 @@ model AiUsage {
   searchCredits   Int      @default(0)
   estimatedInr    Float?
   costInr         Float    @default(0)
-  priceSource     String   // MODEL_PRICE | UNPRICED_FALLBACK
+  priceSource     String   // VERIFIED_PRICE | UNVERIFIED_PRICE | UNPRICED
   priceId         String?
   usdInr          Float
   durationMs      Int      @default(0)
   retries         Int      @default(0)
-  outcome         String   // OK | ERROR | TIMEOUT | INVALID_OUTPUT | REFUSED_BUDGET
+  outcome         String   // SUCCESS | PROVIDER_ERROR | INVALID_OUTPUT | TIMEOUT | FAILED_BEFORE_PROVIDER | CANCELLED | UNKNOWN_PROVIDER_OUTCOME | REFUSED_BUDGET
+  costStatus      String   @default("ESTIMATED") // ACTUAL (provider-reported usage × verified price) | ESTIMATED (uncertain usage or unverified price) | NONE (never reached the provider) | UNPRICED
   error           String?
   userId          String?
   founderId       String?
@@ -413,8 +415,12 @@ model ModelPrice {
   outputUsdPerMTok      Float?
   cachedInputUsdPerMTok Float?
   usdPerCredit          Float?
+  reasoningUsdPerMTok   Float?   // thinking/reasoning tokens; null = billed at the output rate
+  currency              String   @default("USD")
   effectiveFrom         DateTime @default(now())
   active                Boolean  @default(true)
+  verificationStatus    String   @default("UNVERIFIED") // VERIFIED (checked against the provider's price page) | UNVERIFIED
+  verifiedAt            DateTime?
   source                String?  // where the price came from (URL / note)
   createdAt             DateTime @default(now())
   @@unique([provider, model, effectiveFrom])
@@ -428,4 +434,58 @@ model RateLimit {
   count       Int      @default(0)
   @@id([key, windowStart])
   @@index([windowStart])
+}
+
+// ---------------------------------------------------------------- DURABLE JOB RUNTIME (Phase 2)
+// One row per unit of long-running AI work (first user: the paid Aristotle audit). Postgres is the queue: a worker
+// claims a job with an atomic compare-and-set on (status, lease) and owns it until `leaseUntil`; a dead worker's lease
+// expires and another worker resumes from `checkpoint`. Every job belongs to one user (owner) — every lookup is scoped.
+model Job {
+  id                String    @id @default(cuid())
+  type              String    // ARISTOTLE_AUDIT
+  userId            String    // owner (tenant)
+  organizationId    String?
+  subjectType       String?   // AUDIT
+  subjectId         String?
+  dedupeKey         String    @unique // one job per business object (e.g. ARISTOTLE_AUDIT:<auditId>)
+  status            String    @default("QUEUED") // QUEUED | RUNNING | WAITING | COMPLETED | FAILED | CANCELLED
+  progress          String    @default("QUEUED") // human-readable stage: UNDERSTANDING | RESEARCHING | ANALYSING | GENERATING_REPORT | COMPLETED
+  checkpoint        String?   // last durable step reached (PLANNED | RESEARCHED | DECIDED | SAVED)
+  state             Json?     // step outputs needed to resume (e.g. the decided report before it is saved)
+  budgetScopeType   String    // cost-governor scope the job spends from (AiUsage parentType)
+  budgetScopeId     String
+  budgetInr         Float     // included internal cost limit
+  costInr           Float     @default(0) // booked cost (AiUsage, refreshed by the worker)
+  reservedInr       Float     @default(0) // active reservations at the last refresh
+  attempts          Int       @default(0)
+  maxAttempts       Int       @default(3)
+  lastError         String?
+  waitingReason     String?
+  runAfter          DateTime  @default(now())
+  leaseOwner        String?
+  leaseUntil        DateTime?
+  cancelRequestedAt DateTime?
+  createdAt         DateTime  @default(now())
+  startedAt         DateTime?
+  completedAt       DateTime?
+  updatedAt         DateTime  @updatedAt
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([status, runAfter])
+  @@index([userId, createdAt])
+}
+
+// Budget reservations held while a governed provider call is in flight. Postgres-backed so concurrent workers in
+// different processes cannot jointly overspend: reserve = (advisory lock on the scope) + spent + active reservations +
+// new ≤ limit, in one transaction. Released after the call's AiUsage row is written. A reservation whose worker died is
+// expired and converted into an ESTIMATED AiUsage row at its worst case (the call may have been billed).
+model CostReservation {
+  id         String    @id @default(cuid())
+  scopeType  String
+  scopeId    String
+  amountInr  Float
+  spec       Json      // call spec + attribution, used if the reservation expires unreleased
+  expiresAt  DateTime
+  releasedAt DateTime?
+  createdAt  DateTime  @default(now())
+  @@index([scopeType, scopeId, releasedAt])
 }

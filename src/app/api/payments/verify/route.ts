@@ -1,17 +1,17 @@
 import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { getCurrentUser } from '@/lib/session';
-import { runAudit } from '@/lib/ai';
 import Razorpay from 'razorpay';
 import { isDemoMode, razorpayConfigured, verifyRazorpaySignature } from '@/lib/payments';
-import type { Scope } from '@/lib/routing';
-import { getLockedFacts, getResearch, getScopeRecord, payableError, saveResearch } from '@/lib/audit-meta';
+import { getScopeRecord, payableError } from '@/lib/audit-meta';
+import { startAuditJob } from '@/lib/jobs';
 
-// Tavily research + Gemini generation can take ~40s; without this, a short platform default can kill
-// the function after payment and leave a paid audit with no report.
+// The response returns as soon as the job is durable; the bounded job run started with `after()` uses the remaining
+// function lifetime (maxDuration) and later invocations continue it from its checkpoint.
 export const maxDuration = 60;
 
 export async function POST(req: Request) {
+  const startedAt = Date.now();
   try {
     const user = await getCurrentUser();
 
@@ -56,9 +56,7 @@ export async function POST(req: Request) {
     if (gate.error) {
       return NextResponse.json({ error: gate.error }, { status: 403 });
     }
-    // Legacy: order created by the pre-router code → treated as the original NEW_IDEA audit.
-    const scope: Scope = gate.legacy ? 'NEW_IDEA' : scopeRec!.confirmed!.scope;
-    const founderFacts = gate.legacy ? [] : await getLockedFacts(audit.id);
+    // (Scope + locked founder facts are read by the audit job itself; legacy pre-router orders run as NEW_IDEA.)
 
     const alreadyPaid = audit.paymentStatus === 'paid';
     let reconciledPaymentId: string | undefined;
@@ -114,162 +112,26 @@ export async function POST(req: Request) {
       }
     }
 
-    // Claim generation atomically so concurrent/repeat verify calls cannot both run the engine.
-    // A claim older than 3 minutes is treated as stale (e.g. a crashed serverless invocation).
-    const claim = await db.audit.updateMany({
-      where: {
-        id: audit.id,
-        report: '{}',
-        OR: [
-          { status: { not: 'generating' } },
-          { updatedAt: { lt: new Date(Date.now() - 3 * 60 * 1000) } },
-        ],
-      },
+    // Record the verified payment. The report is the completion marker: a generated audit is never regenerated.
+    const marked = await db.audit.updateMany({
+      where: { id: audit.id, report: '{}' },
       data: {
         status: 'generating',
         paymentStatus: 'paid',
         paymentRef: alreadyPaid ? audit.paymentRef : (reconciledPaymentId || b.razorpay_payment_id || audit.paymentRef),
       },
     });
-
-    if (claim.count === 0) {
-      const current = await db.audit.findUnique({ where: { id: audit.id } });
-      if (current && current.report !== '{}') {
-        return NextResponse.json({ ok: true, alreadyGenerated: true });
-      }
-      return NextResponse.json(
-        { error: 'This audit is already being generated. Please wait a moment and refresh.' },
-        { status: 409 }
-      );
+    if (marked.count === 0) {
+      return NextResponse.json({ ok: true, alreadyGenerated: true });
     }
 
-    let result;
+    // Phase 2: the audit runs as a durable job (research → decision → report, checkpointed). This request only makes
+    // the job durable and starts a bounded run after the response; it never waits for the AI work. A closed browser,
+    // a timed-out request or a dead worker cannot lose the paid work: the job resumes from its last checkpoint.
+    // Founder retries (no new payment) re-queue a failed job from where it stopped.
+    const job = await startAuditJob({ id: audit.id, userId: audit.userId, pricePaise: audit.pricePaise }, startedAt);
 
-    try {
-      result = await runAudit({
-        idea: audit.idea,
-        sector: audit.sector as any,
-        stage: audit.stage || undefined,
-        geography: audit.geography || 'India',
-        language: (audit.reportLanguage as any) || 'Simple English',
-        scope,
-        founderFacts,
-      }, {
-        // Research is saved as soon as it exists; a retry after a failed decision stage reuses it
-        // instead of searching again (keeps retries fast and inside the time limit).
-        existingResearch: await getResearch(audit.id),
-        onResearch: (r) => saveResearch(audit.id, r),
-        // Every Gemini and Tavily call of this audit is metered against the audit and its owner.
-        usage: { userId: audit.userId, auditId: audit.id, parentType: 'AUDIT', parentId: audit.id },
-      });
-    } catch (error) {
-      console.error('Aristotle audit engine failed:', error);
-
-      // Payment is recorded as paid; release the claim so generation can be retried without paying again.
-      await db.audit.update({ where: { id: audit.id }, data: { status: 'failed' } }).catch(() => undefined);
-
-      const message =
-        error instanceof Error ? error.message : String(error);
-
-      return NextResponse.json(
-        {
-          error: `Audit engine failed: ${message}`,
-          detail: message,
-        },
-        { status: 502 }
-      );
-    }
-
-    try {
-      await db.audit.update({
-        where: { id: audit.id },
-        data: {
-          report: JSON.stringify(result.report),
-          assumptions: JSON.stringify(result.report.assumptions),
-          computePaise: Math.round(result.pricing.computeInr * 100),
-          marginPaise: Math.round(result.pricing.marginInr * 100),
-          status: 'completed',
-        },
-      });
-
-      if (result.research) await saveResearch(audit.id, result.research);
-
-      await db.projectFile.upsert({
-        where: {
-          auditId_path: {
-            auditId: audit.id,
-            path: 'audit.json',
-          },
-        },
-        update: {
-          content: JSON.stringify(
-            {
-              auditId: audit.id,
-              idea: audit.idea,
-              sector: audit.sector,
-              scope,
-              founderFacts,
-              report: result.report,
-              pricing: result.pricing,
-            },
-            null,
-            2
-          ),
-        },
-        create: {
-          auditId: audit.id,
-          path: 'audit.json',
-          content: JSON.stringify(
-            {
-              auditId: audit.id,
-              idea: audit.idea,
-              sector: audit.sector,
-              scope,
-              founderFacts,
-              report: result.report,
-              pricing: result.pricing,
-            },
-            null,
-            2
-          ),
-        },
-      });
-
-      await db.projectFile.upsert({
-        where: {
-          auditId_path: {
-            auditId: audit.id,
-            path: 'README.md',
-          },
-        },
-        update: {
-          content: `# Aristotle export\n\nAudit ID: ${audit.id}\n\nPortable audit bundle. No proprietary database format is required.`,
-        },
-        create: {
-          auditId: audit.id,
-          path: 'README.md',
-          content: `# Aristotle export\n\nAudit ID: ${audit.id}\n\nPortable audit bundle. No proprietary database format is required.`,
-        },
-      });
-    } catch (error) {
-      console.error('Aristotle audit persistence failed:', error);
-
-      const message =
-        error instanceof Error ? error.message : String(error);
-
-      return NextResponse.json(
-        {
-          error: `Audit was generated but could not be saved: ${message}`,
-          detail: message,
-        },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({
-      ok: true,
-      provider: result.provider,
-    });
+    return NextResponse.json({ ok: true, queued: true, jobId: job.id, status: job.status, progress: job.progress });
   } catch (error) {
     console.error('Aristotle payment verification route failed:', error);
 

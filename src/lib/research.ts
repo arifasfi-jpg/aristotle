@@ -11,7 +11,7 @@
 //
 // All stages run under a shared deadline so the whole audit fits the serverless time limit.
 // ---------------------------------------------------------------------------
-import type { UsageContext } from './ai-usage';
+import { fetchFailurePhase, sent, type UsageContext } from './ai-usage';
 import { aristotleGeminiJson, meteredSearch } from './hippo/gateway';
 import {
   CONFIDENCE, QUESTION_STATUS, RESEARCH_CATEGORIES,
@@ -119,7 +119,8 @@ type TavilyResult = { title?: string; url?: string; content?: string; raw_conten
 export async function tavilySearch(query: string, opts: { deep: boolean; geography?: string; timeoutMs: number; usage?: UsageContext }): Promise<TavilyResult[]> {
   const key = process.env.TAVILY_API_KEY;
   if (!key) throw new Error('AI_ENGINE_NOT_CONFIGURED: TAVILY_API_KEY is missing');
-  // Every request is metered (2 credits: advanced depth); failed requests are recorded at no cost.
+  // Every request is budget-checked and metered (2 credits: advanced depth). A request that was sent and then failed or
+  // timed out is booked at its credits (ESTIMATED); one that never reached Tavily is booked at ₹0.
   return meteredSearch({ provider: 'tavily', depth: 'advanced' }, opts.usage, () => tavilyRequest(key, query, opts));
 }
 
@@ -142,11 +143,12 @@ async function tavilyRequest(key: string, query: string, opts: { deep: boolean; 
         ...(/india/i.test(opts.geography || 'India') ? { country: 'india' } : {}),
       }),
     });
-    if (!res.ok) throw new Error(`TAVILY_ERROR ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    if (!res.ok) throw sent(new Error(`TAVILY_ERROR ${res.status}: ${(await res.text()).slice(0, 200)}`), { httpStatus: res.status });
     const data = await res.json();
     return Array.isArray(data?.results) ? data.results : [];
   } catch (e) {
-    if (e instanceof Error && e.name === 'AbortError') throw new Error(`TAVILY_TIMEOUT after ${Math.round(opts.timeoutMs / 1000)}s`);
+    if (e instanceof Error && e.name === 'AbortError') throw sent(new Error(`TAVILY_TIMEOUT after ${Math.round(opts.timeoutMs / 1000)}s`));
+    if (e instanceof Error && !(e as { providerPhase?: string }).providerPhase) Object.assign(e, { providerPhase: fetchFailurePhase(e) });
     throw e;
   } finally {
     clearTimeout(timeout);
@@ -221,10 +223,12 @@ export function verifyFindings(raw: unknown, questionId: string, sources: Resear
 const remaining = (deadline: number) => deadline - Date.now();
 
 /** A research.json checkpoint written right after planning, so a retry never repeats a completed plan. */
+const isBudgetRefusal = (e: unknown) => e instanceof Error && /AI_BUDGET_EXCEEDED/.test(e.message);
+
 export const isPlanCheckpoint = (r: ResearchRecord | null | undefined): r is ResearchRecord & { stage: 'PLANNED'; plan: ResearchPlan } => r?.version === 2 && r.stage === 'PLANNED' && Boolean(r.plan);
 export const planCheckpoint = (plan: ResearchPlan, at: Date): ResearchRecord => ({ version: 2, stage: 'PLANNED', retrievedAt: at.toISOString(), queries: plan.questions.map((q) => q.query), sources: [], businessModel: plan.businessModel, plan });
 
-export async function researchBusiness(input: ResearchInput, deadline: number, now = () => new Date(), opts: { plan?: ResearchPlan | null; onPlan?: (checkpoint: ResearchRecord) => Promise<void>; usage?: UsageContext } = {}): Promise<ResearchRecord> {
+export async function researchBusiness(input: ResearchInput, deadline: number, now = () => new Date(), opts: { plan?: ResearchPlan | null; onPlan?: (checkpoint: ResearchRecord) => Promise<void>; usage?: UsageContext; planOnly?: boolean } = {}): Promise<ResearchRecord> {
   const usage: Usage = { inputTokens: 0, outputTokens: 0, tavilySearches: 0 };
 
   // 1. PLAN (or reuse the plan saved by an earlier attempt)
@@ -237,6 +241,8 @@ export async function researchBusiness(input: ResearchInput, deadline: number, n
     planResult = normalisePlan(plan.data);
     if (opts.onPlan) await opts.onPlan(planCheckpoint(planResult, now()));
   }
+  // Job runtime: stop at the durable plan checkpoint so the next step starts in a fresh time budget.
+  if (opts.planOnly) return planCheckpoint(planResult, now());
   const { businessModel, questions: planned } = planResult;
 
   // 2. SEARCH (parallel)
@@ -244,6 +250,9 @@ export async function researchBusiness(input: ResearchInput, deadline: number, n
   if (searchTimeout < 4000) throw new Error('AUDIT_TIME_BUDGET_EXCEEDED: not enough time left to research');
   const searched = await Promise.allSettled(planned.map((q) => tavilySearch(q.query, { deep: q.category === 'REGULATION' || q.category === 'ALTERNATIVES_PRICING', geography: input.geography, timeoutMs: searchTimeout, usage: opts.usage })));
   usage.tavilySearches = planned.length;
+  // A search refused by the cost governor is not a "failed search": research would silently lose quality. Stop instead.
+  const refusedSearch = searched.find((x) => x.status === 'rejected' && isBudgetRefusal(x.reason));
+  if (refusedSearch) throw (refusedSearch as PromiseRejectedResult).reason;
   if (searched.every((s) => s.status === 'rejected')) {
     throw new Error(`RESEARCH_FAILED: all searches failed (${(searched[0] as PromiseRejectedResult).reason instanceof Error ? ((searched[0] as PromiseRejectedResult).reason as Error).message : 'unknown'})`);
   }
@@ -284,6 +293,9 @@ export async function researchBusiness(input: ResearchInput, deadline: number, n
     usage.inputTokens += r.inputTokens; usage.outputTokens += r.outputTokens;
     return r.data;
   }));
+
+  const refusedExtract = extracted.find((x) => x.status === 'rejected' && isBudgetRefusal(x.reason));
+  if (refusedExtract) throw (refusedExtract as PromiseRejectedResult).reason;
 
   const findings: Finding[] = [];
   const questions: ResearchQuestion[] = planned.map((q, i) => {

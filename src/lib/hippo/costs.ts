@@ -1,6 +1,6 @@
 // Cost intelligence. Deterministic arithmetic over clearly labelled inputs.
 // AI may propose effort (hours, specialist, rate assumptions); the maths, the labels and the margins are code.
-import { estimateCompute } from '../pricing';
+import { costOf, type Price } from '../ai-usage';
 import type { Capability } from './capabilities';
 import { allowedModes } from './capabilities';
 import type { EffortModel, ExecutionMode } from './types';
@@ -8,7 +8,7 @@ import type { EffortModel, ExecutionMode } from './types';
 export const PLATFORM_MARGIN = 0.10; // Hippoturtle's disclosed margin on execution cost (cost + 10%)
 
 export const LABELS = {
-  COMPUTED: 'Calculated from the configured AI model rates — actual cost is recorded after execution',
+  COMPUTED: 'Calculated from the routed model’s price (ModelPrice) — actual cost is recorded after execution',
   AI_BENCHMARK: 'AI-generated benchmark estimate — indicative only, external quote required',
 } as const;
 
@@ -50,21 +50,25 @@ const COMMON_DRIVERS = ['Scope and number of deliverables', 'Human effort and sp
 /**
  * Estimates for every execution option this WORK allows (`modes` from classifyWork). Rates of 0 mean "not established"
  * → no human estimate. Without `modes` (legacy callers) the capability's modes and the model's aiFeasible are used.
+ * AI cost uses `price` — the ModelPrice of the model the router will execute with (the same formula as the ledger:
+ * costOf). No price (UNPRICED) → no AI figure rather than an invented one.
  */
-export function computeEstimates(effort: EffortModel, cap: Capability, promptTokens: number, workModes?: ExecutionMode[]): Estimate[] {
+export function computeEstimates(effort: EffortModel, cap: Capability, promptTokens: number, price: Price, workModes?: ExecutionMode[]): Estimate[] {
   const out: Estimate[] = [];
   const drivers = [...effort.costDrivers, ...COMMON_DRIVERS].filter((d, i, a) => a.indexOf(d) === i).slice(0, 8);
   const modes = workModes ?? allowedModes(cap);
-  const aiAllowed = modes.includes('AI') && (workModes ? true : effort.aiFeasible);
-  const ai = estimateCompute(promptTokens + 1500, effort.aiOutputTokens);
-  const aiLow = ai.computeInr * (1 + PLATFORM_MARGIN);
-  const aiHigh = estimateCompute(promptTokens + 3000, Math.min(12000, effort.aiOutputTokens * 1.5)).computeInr * (1 + PLATFORM_MARGIN);
+  const priced = price.status !== 'UNPRICED';
+  const aiAllowed = modes.includes('AI') && (workModes ? true : effort.aiFeasible) && priced;
+  const aiCompute = costOf({ inputTokens: promptTokens + 1500, outputTokens: effort.aiOutputTokens }, price);
+  const aiLow = aiCompute * (1 + PLATFORM_MARGIN);
+  const aiHigh = costOf({ inputTokens: promptTokens + 3000, outputTokens: Math.min(12000, effort.aiOutputTokens * 1.5) }, price) * (1 + PLATFORM_MARGIN);
+  const ai = { computeInr: aiCompute };
   const rateKnown = effort.hourlyRateInr.low > 0;
   const human = rateKnown ? { low: effort.humanHours.low * effort.hourlyRateInr.low, high: effort.humanHours.high * effort.hourlyRateInr.high } : null;
 
   if (aiAllowed) {
     out.push({ mode: 'AI', low: r2(aiLow), high: r2(aiHigh), label: 'COMPUTED',
-      basis: `≈${(promptTokens + 1500).toLocaleString('en-IN')} input + ≈${effort.aiOutputTokens.toLocaleString('en-IN')} output tokens at the configured model rates, plus ${PLATFORM_MARGIN * 100}% platform margin.`,
+      basis: `≈${(promptTokens + 1500).toLocaleString('en-IN')} input + ≈${effort.aiOutputTokens.toLocaleString('en-IN')} output tokens at the routed model’s price${price.status === 'UNVERIFIED_PRICE' ? ' (price not yet verified)' : ''}, plus ${PLATFORM_MARGIN * 100}% platform margin.`,
       breakdown: { 'AI / API cost (₹)': r2(ai.computeInr), 'Platform margin (₹)': r2(ai.computeInr * PLATFORM_MARGIN), 'Human effort (₹)': 0, 'Infrastructure': 'included' }, drivers: ['Length of the deliverable (output tokens)', 'Amount of context provided'] });
   }
   if (modes.includes('HUMAN') && human) {
@@ -75,7 +79,7 @@ export function computeEstimates(effort: EffortModel, cap: Capability, promptTok
       basis: `Human estimate × ${effort.agencyMultiplier.low}–${effort.agencyMultiplier.high} for agency overheads (account management, QA, margin).`,
       breakdown: { 'Agency multiplier (low)': effort.agencyMultiplier.low, 'Agency multiplier (high)': effort.agencyMultiplier.high }, drivers });
   }
-  if (modes.includes('HYBRID') && rateKnown) {
+  if (modes.includes('HYBRID') && rateKnown && priced) {
     const reviewLow = effort.hybridReviewHours.low * effort.hourlyRateInr.low; const reviewHigh = effort.hybridReviewHours.high * effort.hourlyRateInr.high;
     out.push({ mode: 'HYBRID', low: r0(aiLow + reviewLow), high: r0(aiHigh + reviewHigh), label: 'AI_BENCHMARK',
       basis: `AI prepares the draft (≈₹${r2(aiLow)}), then a ${effort.specialist}${cap.requiresProfessional && !modes.includes('AI') ? ' (qualified professional, required)' : ''} reviews for ${effort.hybridReviewHours.low}–${effort.hybridReviewHours.high} hours at the assumed rate.`,

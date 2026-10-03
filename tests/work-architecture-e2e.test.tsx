@@ -58,14 +58,16 @@ function gemini(text: string): unknown {
 }
 
 beforeAll(() => {
-  Object.assign(process.env, { GEMINI_API_KEY: 'test', TAVILY_API_KEY: 'test', DEMO_MODE: 'true', VERCEL_ENV: 'preview' });
+  // Phase 1.1: like production (DATABASE_URL set → ledger on), ModelPrice is read from this real database; AI cost
+  // estimates come from it and there is no env fallback price any more.
+  Object.assign(process.env, { GEMINI_API_KEY: 'test', TAVILY_API_KEY: 'test', DEMO_MODE: 'true', VERCEL_ENV: 'preview', HIPPO_USAGE_LEDGER: 'on' });
   delete process.env.HIPPO_WORK_PAYMENTS;
   vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
     const text: string = JSON.parse(String(init?.body || '{}')).contents[0].parts[0].text;
     return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(gemini(text)) }] } }], usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 10 } }), { status: 200 });
   }));
 });
-afterAll(() => vi.unstubAllGlobals());
+afterAll(() => { vi.unstubAllGlobals(); delete process.env.HIPPO_USAGE_LEDGER; });
 
 const req = (body: unknown = {}) => new Request('http://x', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 const ctx = (id: string) => ({ params: Promise.resolve({ id }) });

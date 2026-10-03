@@ -3,7 +3,7 @@
 // action + hashed client IP and action + user. IPs are never stored in clear.
 import crypto from 'crypto';
 
-export type GuardedAction = 'explore' | 'objective' | 'scope-classify' | 'quote' | 'converse';
+export type GuardedAction = 'explore' | 'objective' | 'scope-classify' | 'quote' | 'converse' | 'respond';
 
 /** Requests per hour. Per-IP limits stop one machine from minting guest accounts to bypass the per-user limit. */
 export const LIMITS: Record<GuardedAction, { user: number; ip: number }> = {
@@ -12,6 +12,7 @@ export const LIMITS: Record<GuardedAction, { user: number; ip: number }> = {
   'scope-classify': { user: 20, ip: 60 },
   quote: { user: 30, ip: 90 },
   converse: { user: 60, ip: 180 },
+  respond: { user: 20, ip: 20 }, // public page responses (no AI cost; spam protection)
 };
 const WINDOW_MS = 60 * 60_000;
 

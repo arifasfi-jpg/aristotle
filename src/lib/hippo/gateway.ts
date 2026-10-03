@@ -7,7 +7,7 @@ import { fetchFailurePhase, sent } from '../ai-usage';
 import { callGeminiJson, cleanJson, geminiModel, type GeminiResult } from '../gemini';
 
 export type AiProvider = 'gemini' | 'openai' | 'anthropic';
-export type AiTask = 'understand' | 'pathways' | 'plan' | 'brief' | 'execute' | 'compare' | 'explore' | 'converse';
+export type AiTask = 'understand' | 'pathways' | 'plan' | 'brief' | 'execute' | 'compare' | 'explore' | 'converse' | 'move' | 'move-prepare';
 /** Aristotle engine calls (always Gemini: its prompts rely on Gemini response schemas and thinking settings). */
 export type AristotleTask = 'research-plan' | 'research-extract' | 'research-escalate' | 'research-gap' | 'decision' | 'scope-classifier';
 
@@ -32,6 +32,9 @@ export const TASK_ROUTE: Record<AiTask | AristotleTask | 'research-search', { pu
   brief: { purpose: 'WORK', tier: 1 },
   execute: { purpose: 'WORK', tier: 1 },
   compare: { purpose: 'WORK', tier: 0 },
+  // Moves (HIPPO_MOVES): choosing the next Move and preparing what it needs. Free to the founder, so free-tier capped.
+  move: { purpose: 'WORK', tier: 1, free: true },
+  'move-prepare': { purpose: 'WORK', tier: 1, free: true },
 };
 export const FREE_TASKS = Object.entries(TASK_ROUTE).filter(([, r]) => r.free).map(([t]) => t);
 
@@ -44,6 +47,8 @@ export const TASK_CONFIG: Record<AiTask, { temperature: number; maxOutputTokens:
   compare: { temperature: 0.2, maxOutputTokens: 1200, timeoutMs: 25_000 },
   explore: { temperature: 0.8, maxOutputTokens: 2000, timeoutMs: 25_000 },
   converse: { temperature: 0.6, maxOutputTokens: 900, timeoutMs: 15_000 },
+  move: { temperature: 0.4, maxOutputTokens: 2500, timeoutMs: 20_000 },
+  'move-prepare': { temperature: 0.5, maxOutputTokens: 4000, timeoutMs: 22_000 },
 };
 
 const MODEL_ENV: Record<AiProvider, [string, string, string]> = {

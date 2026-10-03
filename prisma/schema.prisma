@@ -322,6 +322,13 @@ model Outcome {
   summary     String
   metrics     Json
   recordedBy  String
+  // Signals (Moves): which Move this responds to, how strong it is, who observed it, and its proof.
+  moveId      String?
+  rung        Int?      // 3 action · 4 signal · 5 verified outcome
+  source      String?   // FOUNDER_REPORTED | SYSTEM_OBSERVED
+  polarity    String?   // POSITIVE | NEGATIVE | NEUTRAL
+  proof       String?
+  external    Boolean?  // false when it came from the founder's own session (a self-test)
   createdAt   DateTime  @default(now())
   objective   Objective @relation(fields: [objectiveId], references: [id], onDelete: Cascade)
   work        Work?     @relation(fields: [workId], references: [id], onDelete: Cascade)
@@ -519,3 +526,80 @@ model ConversationMessage {
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   @@index([conversationId, createdAt])
 }
+
+// ---------------------------------------------------------------- Moves (HIPPO_MOVES)
+// The Move: one executable unit of business progress. Exactly one is current per objective (partial unique index in
+// the migration). Work/Execution hold documents Hippo prepares; PublicPage is the native public surface.
+model Move {
+  id                   String    @id @default(cuid())
+  organizationId       String
+  objectiveId          String
+  conversationId       String?
+  kind                 String    // RESEARCH | BUILD | SELL | TALK | TEST | PRICE | BUY | CONTACT | PUBLISH | DECIDE | STOP | PIVOT | VALIDATE | EXECUTE
+  owner                String    // HIPPO | FOUNDER — who performs the external step
+  title                String    // what we're doing
+  why                  String
+  bet                  String    // the working hypothesis this Move tests (internal)
+  hippoWill            String    // what Hippo will do
+  needs                Json      // string[] — what Hippo needs from the founder
+  costInr              Float?
+  costBasis            String
+  expectedSignal       String
+  artifactType         String    @default("NONE") // NONE | DOCUMENT | PUBLIC_PAGE | DEEP_RESEARCH
+  artifactBrief        String    @default("")
+  alternative          Json?
+  routeKey             String    // normalised approach, to stop repeating a failed route
+  consequential        Boolean   @default(false)
+  consequentialReasons Json      // string[] — decided by the server, never lowered by the model
+  status               String    @default("PROPOSED") // PROPOSED | PREPARING | READY | APPROVED | LIVE | SIGNALLED | PARKED | DONE | FAILED | DECLINED | SUPERSEDED
+  rung                 Int       @default(1)
+  workId               String?
+  publicPageId         String?
+  proof                String?
+  proofSource          String?   // FOUNDER_REPORTED | FOUNDER_LINK | SYSTEM_VERIFIED
+  authorizedBy         String?   // FOUNDER | GUARDIAN
+  authorizedAt         DateTime?
+  actedAt              DateTime?
+  reason               String    @default("START")
+  previousMoveId       String?
+  closeReason          String?
+  reply                String    @default("")
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  @@index([objectiveId, createdAt])
+  @@index([organizationId, createdAt])
+}
+
+model PublicPage {
+  id             String    @id @default(cuid())
+  slug           String    @unique
+  organizationId String
+  objectiveId    String
+  moveId         String
+  status         String    @default("DRAFT") // DRAFT | PUBLISHED | UNPUBLISHED
+  headline       String
+  subhead        String    @default("")
+  body           String
+  cta            String
+  priceInr       Float?
+  views          Int       @default(0)
+  publishedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  responses      PublicResponse[]
+  @@index([moveId])
+}
+
+model PublicResponse {
+  id        String     @id @default(cuid())
+  pageId    String
+  name      String?
+  contact   String
+  message   String?
+  ipHash    String?
+  fromOwner Boolean    @default(false)
+  createdAt DateTime   @default(now())
+  page      PublicPage @relation(fields: [pageId], references: [id], onDelete: Cascade)
+  @@index([pageId, createdAt])
+}
+

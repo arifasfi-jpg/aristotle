@@ -55,8 +55,10 @@ describe('Router: every task has a purpose and a tier; models are configuration'
       // Research escalation (intentional): follow-up queries and gap explanations are research spend, never free.
       'research-escalate': 'RESEARCH', 'research-gap': 'RESEARCH',
       decision: 'ARISTOTLE', pathways: 'ARISTOTLE', plan: 'WORK', brief: 'WORK', execute: 'WORK', compare: 'WORK',
+      // V1 Moves (intentional): planning and preparing the founder's next Move is work, free to the founder but capped.
+      move: 'WORK', 'move-prepare': 'WORK',
     });
-    expect(FREE_TASKS.sort()).toEqual(['converse', 'explore', 'scope-classifier', 'understand']); // reachable before any payment
+    expect(FREE_TASKS.sort()).toEqual(['converse', 'explore', 'move', 'move-prepare', 'scope-classifier', 'understand']); // reachable before any payment
   });
   it('a tier can be moved to another model by configuration only (provider key required)', () => {
     process.env.GEMINI_API_KEY = 'k'; delete process.env.OPENAI_API_KEY; delete process.env.HIPPO_AI_PROVIDER; process.env.GEMINI_MODEL = 'gemini-3.5-flash-lite';

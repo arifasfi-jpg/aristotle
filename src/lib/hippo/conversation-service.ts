@@ -9,6 +9,8 @@ import { getResearch } from '../audit-meta';
 import type { ResearchRecord } from '../evidence';
 import { createObjective } from './service';
 import { stableId } from './context';
+import { movesEnabled } from './moves';
+import { MOVES_OPENING, movesState, postMoveMessage, type MoveView } from './conversation-moves';
 
 const json = (v: unknown) => v as Prisma.InputJsonValue;
 type Ctx = { user: { id: string }; founder: { id: string; name: string | null }; org: { id: string; name?: string; isDemo?: boolean } };
@@ -16,9 +18,11 @@ type Ctx = { user: { id: string }; founder: { id: string; name: string | null };
 export type ConversationView = {
   id: string | null; phase: Phase; status: Status; state: BusinessState; objectiveId: string | null; auditId: string | null;
   messages: { id: string; role: 'HIPPO' | 'FOUNDER'; text: string; at: string; kind?: string }[];
+  // Moves (HIPPO_MOVES=on): the one current Move pinned on the table, whether Hippo is still working, quick replies.
+  moves?: boolean; move?: MoveView | null; thinking?: boolean; quick?: string[];
 };
 
-const opening = (): ConversationView['messages'][number] => ({ id: 'opening', role: 'HIPPO', text: OPENING, at: new Date(0).toISOString() });
+const opening = (): ConversationView['messages'][number] => ({ id: 'opening', role: 'HIPPO', text: movesEnabled() ? MOVES_OPENING : OPENING, at: new Date(0).toISOString() });
 
 /** The founder's current conversation (latest not archived), or null. Owner-scoped: only this user's rows. */
 async function current(userId: string) {
@@ -27,13 +31,15 @@ async function current(userId: string) {
 
 export async function viewConversation(userId: string | null): Promise<ConversationView> {
   const conv = userId ? await current(userId) : null;
-  if (!conv) return { id: null, phase: 'DISCOVER', status: 'ACTIVE', state: emptyState(), objectiveId: null, auditId: null, messages: [opening()] };
-  await explainResultIfReady(conv);
+  if (!conv) return { id: null, phase: 'DISCOVER', status: 'ACTIVE', state: emptyState(), objectiveId: null, auditId: null, messages: [opening()], ...(movesEnabled() ? { moves: true, move: null, thinking: false, quick: [] } : {}) };
+  const moves = movesEnabled() ? { moves: true, ...(await movesState(conv.phase === 'MOVING' ? conv.objectiveId : null, { ...emptyState(), ...(conv.state as Partial<BusinessState>) })) } : {};
+  if (!movesEnabled()) await explainResultIfReady(conv);
   const msgs = await db.conversationMessage.findMany({ where: { conversationId: conv.id }, orderBy: { createdAt: 'asc' } });
   const objective = conv.objectiveId ? await db.objective.findUnique({ where: { id: conv.objectiveId }, select: { auditId: true } }) : null;
   return {
     id: conv.id, phase: conv.phase as Phase, status: conv.status as Status, state: conv.state as unknown as BusinessState, objectiveId: conv.objectiveId, auditId: objective?.auditId ?? null,
     messages: [opening(), ...msgs.map((m) => ({ id: m.id, role: m.role as 'HIPPO' | 'FOUNDER', text: m.text, at: m.createdAt.toISOString(), kind: (m.meta as { kind?: string } | null)?.kind }))],
+    ...moves,
   };
 }
 
@@ -41,6 +47,7 @@ export async function viewConversation(userId: string | null): Promise<Conversat
 export async function postMessage(ctx: Ctx, text: string): Promise<ConversationView> {
   let conv = await current(ctx.user.id);
   if (!conv) conv = await db.conversation.create({ data: { userId: ctx.user.id, state: json(emptyState()) } });
+  if (movesEnabled()) { await postMoveMessage(ctx, conv, text); return viewConversation(ctx.user.id); }
   const state = conv.state as unknown as BusinessState;
   const phase = conv.phase as Phase;
   await db.conversationMessage.create({ data: { conversationId: conv.id, role: 'FOUNDER', text } });

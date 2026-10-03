@@ -6,6 +6,7 @@ import { ArrowRight, ArrowUp, Loader2, RotateCcw } from 'lucide-react';
 import type { ConversationView } from '@/lib/hippo/conversation-service';
 import { ErrorNote, post } from './client';
 import ResearchLauncher from './ResearchLauncher';
+import MoveCard from './MoveCard';
 
 function Bubble({ role, text }: { role: 'HIPPO' | 'FOUNDER'; text: string }) {
   const hippo = role === 'HIPPO';
@@ -38,6 +39,15 @@ export default function HippoChat({ initial, demoCheckout }: { initial: Conversa
   const [pending, setPending] = useState<string | null>(null);
   const end = useRef<HTMLDivElement>(null);
   useEffect(() => { end.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [v.messages.length, busy]);
+  // Moves: while Hippo works on the next move (or the world may answer a live one), keep the view fresh.
+  const live = v.move?.status === 'LIVE';
+  useEffect(() => {
+    if (!v.moves || busy || !(v.thinking || live)) return;
+    const t = setTimeout(async () => {
+      try { const r = await fetch('/api/hippo/conversation', { cache: 'no-store' }); if (r.ok) setV(await r.json()); } catch { /* next tick */ }
+    }, v.thinking ? 3000 : 10000);
+    return () => clearTimeout(t);
+  }, [v, busy, live]);
 
   async function send(msg = text) {
     const t = msg.trim();
@@ -54,16 +64,18 @@ export default function HippoChat({ initial, demoCheckout }: { initial: Conversa
     finally { setBusy(false); }
   }
   const handoff = [...v.messages].reverse().find((m) => m.kind === 'HANDOFF');
-  const quick = v.phase === 'PROPOSED' ? ['Yes, dig in', 'Change the target', 'Challenge your assumption', 'Stop'] : v.messages.length <= 1 ? ['I want to start a clothing business', "I don't know yet"] : [];
+  const quick = v.moves ? (v.quick ?? []) : v.phase === 'PROPOSED' ? ['Yes, dig in', 'Change the target', 'Challenge your assumption', 'Stop'] : v.messages.length <= 1 ? ['I want to start a clothing business', "I don't know yet"] : [];
 
   return <div className="flex flex-col gap-3">
-    <Context v={v} />
+    {!v.moves && <Context v={v} />}
+    {v.moves && v.move && <MoveCard move={v.move} thinking={Boolean(v.thinking)} objectiveId={v.objectiveId} auditId={v.auditId} demoCheckout={demoCheckout} onView={setV} onError={setErr} />}
     <div className="ht-card flex min-h-[55vh] flex-col">
       <div role="log" aria-live="polite" className="flex-1 space-y-3 overflow-y-auto p-4 sm:p-6">
         {v.messages.map((m) => <Bubble key={m.id} role={m.role} text={m.text} />)}
         {pending && <Bubble role="FOUNDER" text={pending} />}
+        {v.moves && v.thinking && !v.move && !busy && <div className="flex items-center gap-2 pl-10 text-sm text-[#6B7389]"><Loader2 size={15} className="animate-spin text-[#4F46E5]"/>Hippo is working out the first move…</div>}
         {busy && pending && <div className="flex items-center gap-2 pl-10 text-sm text-[#6B7389]"><Loader2 size={15} className="animate-spin text-[#4F46E5]"/>Hippo is thinking…</div>}
-        {handoff && v.objectiveId && v.auditId && v.phase === 'HANDED_OFF' && <div className="pl-0 sm:pl-10">
+        {!v.moves && handoff && v.objectiveId && v.auditId && v.phase === 'HANDED_OFF' && <div className="pl-0 sm:pl-10">
           <ResearchLauncher objectiveId={v.objectiveId} auditId={v.auditId} demoCheckout={demoCheckout} />
         </div>}
         {v.objectiveId && v.messages.some((m) => m.kind === 'RESULT') && <div className="pl-10"><Link href={`/objectives/${v.objectiveId}`} className="inline-flex items-center gap-1.5 text-sm font-bold text-[#4F46E5]">Open the full analysis <ArrowRight size={14}/></Link></div>}
@@ -79,7 +91,7 @@ export default function HippoChat({ initial, demoCheckout }: { initial: Conversa
           <button type="submit" disabled={busy || !text.trim()} aria-label="Send" className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-[#0B1533] text-white disabled:opacity-40">{busy ? <Loader2 size={18} className="animate-spin"/> : <ArrowUp size={18}/>}</button>
         </form>
         <div className="mt-2 flex items-center justify-between text-[11px] text-[#6B7389]">
-          <span>Talking to Hippo is free. Nothing is researched or charged until you say so.</span>
+          <span>{v.moves ? 'Talking to Hippo is free. Nothing goes public, costs money or is sent without your OK.' : 'Talking to Hippo is free. Nothing is researched or charged until you say so.'}</span>
           {v.id && <button type="button" onClick={restart} disabled={busy} className="inline-flex items-center gap-1 font-semibold hover:text-[#0B1533]"><RotateCcw size={12}/>Start over</button>}
         </div>
         <ErrorNote msg={err} onRetry={text.trim() ? () => send() : undefined} />

@@ -6,6 +6,8 @@
 //
 // The pure function `applyTurn` holds every rule (testable without a database or a model). The route does I/O.
 import { extractFounderFacts, type FounderFact } from '../founder-facts';
+import type { DirectionChoice } from './explore';
+import type { Capacity, FounderProfile } from './moves';
 
 export const MAX_PROBES = 3;
 export const OPENING = 'Alright bro. What are you trying to build or achieve?';
@@ -26,10 +28,18 @@ export type BusinessState = {
   // bookkeeping
   probes: number;                                  // probing questions asked since the objective was set
   previous_objectives: { objective: string; known_facts: KnownFact[]; at: string }[];
+  // Moves (HIPPO_MOVES) — optional so stored conversations from before stay valid.
+  profile?: FounderProfile;                        // read from the founder's words, never a questionnaire
+  capacity?: Capacity;                             // money, time, things they won't do, access, existing customers
+  noIdea?: boolean;                                // "I don't know what to do" — Hippo helps choose before any Move
+  ideaQuestions?: number;                          // questions asked while choosing (at most 2)
+  directions?: DirectionChoice[];                  // the three directions offered
+  recommended?: number; recommendWhy?: string;
+  signals?: { summary: string; polarity: string; source: string; at: string; moveId: string }[];
 };
 export const emptyState = (): BusinessState => ({ objective: null, target: null, current_state: null, constraints: [], known_facts: [], unknowns: [], founder_preferences: [], conversation_summary: '', probes: 0, previous_objectives: [] });
 
-export type Phase = 'DISCOVER' | 'PROPOSED' | 'HANDED_OFF';
+export type Phase = 'DISCOVER' | 'PROPOSED' | 'HANDED_OFF' | 'MOVING';
 export type Status = 'ACTIVE' | 'PAUSED' | 'HANDED_OFF' | 'ARCHIVED';
 export type Intent = 'OBJECTIVE' | 'ANSWER' | 'DONT_KNOW' | 'CORRECTION' | 'CHANGE_OBJECTIVE' | 'STOP' | 'APPROVE' | 'CHALLENGE' | 'OTHER';
 export const INTENTS: Intent[] = ['OBJECTIVE', 'ANSWER', 'DONT_KNOW', 'CORRECTION', 'CHANGE_OBJECTIVE', 'STOP', 'APPROVE', 'CHALLENGE', 'OTHER'];

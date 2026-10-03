@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { TRUTH_LABEL, type TruthStatus } from '@/lib/hippo/types';
+import { movesEnabled } from '@/lib/hippo/moves';
 
 export function Logo({ light = false }: { light?: boolean }) {
   return <Link href="/" className="flex items-center gap-2.5">
@@ -14,7 +15,9 @@ export function Shell({ children, active }: { children: React.ReactNode; active?
     <header className="sticky top-0 z-40 border-b border-[#E9E2D4] bg-[#FBF7EF]/90 backdrop-blur">
       <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
         <Logo />
-        <nav className="flex items-center gap-1">{nav('/company', 'My company', 'company')}{nav('/memory', 'Memory', 'memory')}<Link href="/start" className="ml-1 hidden rounded-full bg-[#FF8A1F] px-4 py-2 text-sm font-semibold text-[#0B1533] hover:bg-[#FF9C3F] sm:inline-flex">New objective</Link></nav>
+        {movesEnabled()
+          ? <nav className="flex items-center gap-1">{nav('/start', 'Hippo', 'start')}{nav('/memory', 'Ledger', 'memory')}</nav>
+          : <nav className="flex items-center gap-1">{nav('/company', 'My company', 'company')}{nav('/memory', 'Memory', 'memory')}<Link href="/start" className="ml-1 hidden rounded-full bg-[#FF8A1F] px-4 py-2 text-sm font-semibold text-[#0B1533] hover:bg-[#FF9C3F] sm:inline-flex">New objective</Link></nav>}
       </div>
     </header>
     <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10">{children}</main>

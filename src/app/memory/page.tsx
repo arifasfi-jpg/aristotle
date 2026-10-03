@@ -4,6 +4,8 @@ import { db } from '@/lib/db';
 import { getFounderContext } from '@/lib/hippo/context';
 import { businessName, TRUTH_LABEL, type TruthStatus } from '@/lib/hippo/types';
 import { Badge, Card, Eyebrow, Shell, TruthBadge, day, when } from '@/components/hippo/ui';
+import { movesEnabled } from '@/lib/hippo/moves';
+import { ledgerFor } from '@/lib/hippo/move-service';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,6 +14,7 @@ const TRUTH_ORDER: TruthStatus[] = ['VERIFIED_FACT', 'FOUNDER_STATED', 'ASSUMPTI
 export default async function Memory() {
   const ctx = await getFounderContext();
   if (!ctx?.org) return <Shell active="memory"><Card><p>No business memory yet. <Link href="/start" className="font-bold text-[#4F46E5] underline">Start with an idea</Link>.</p></Card></Shell>;
+  if (movesEnabled()) return <Ledger data={await ledgerFor(ctx.org.id)} name={businessName(ctx.org.name) || 'your business'} />;
   const [rows, activity] = await Promise.all([
     db.businessMemory.findMany({ where: { organizationId: ctx.org.id }, orderBy: { occurredAt: 'desc' }, take: 400 }),
     db.activityLog.findMany({ where: { organizationId: ctx.org.id }, orderBy: { createdAt: 'desc' }, take: 60 }),
@@ -45,5 +48,23 @@ export default async function Memory() {
       </div>
     </div>
     <p className="mt-6 text-xs text-[#6B7389]">Statuses: {TRUTH_ORDER.map((s) => TRUTH_LABEL[s]).join(' · ')}.</p>
+  </Shell>;
+}
+
+const span = (ms: number) => (ms < 3_600_000 ? `${Math.max(1, Math.round(ms / 60_000))} min` : ms < 172_800_000 ? `${Math.round(ms / 3_600_000)} h` : `${Math.round(ms / 86_400_000)} days`);
+
+/** The Ledger: what really happened. Only real actions, real responses and the OKs you gave — each says who saw it. */
+function Ledger({ data, name }: { data: Awaited<ReturnType<typeof ledgerFor>>; name: string }) {
+  const { entries, milestones: m } = data;
+  const marks: [string, Date | null][] = [['First real action', m.firstAction], ['First response from the world', m.firstSignal], ['First response Hippo saw itself', m.firstVerified], ['First payment from a stranger', m.firstStrangerPayment]];
+  return <Shell active="memory">
+    <div className="mx-auto max-w-3xl">
+      <Eyebrow>Ledger · {name}</Eyebrow>
+      <h1 className="mt-1 text-3xl font-extrabold tracking-tight">What really happened.</h1>
+      <p className="mt-2 leading-7 text-[#5B6478]">Only things that happened outside this screen, and the OKs you gave. Plans and drafts don’t count here.</p>
+      <div className="mt-6 grid gap-2 sm:grid-cols-2">{marks.map(([k, d]) => <div key={k} className="rounded-2xl border border-[#E9E2D4] bg-white p-3"><div className="text-[10px] font-bold uppercase tracking-[.14em] text-[#6B7389]">{k}</div><div className="mt-0.5 text-sm font-bold">{d ? day(d) : 'Not yet'}</div></div>)}</div>
+      {m.msToFirstExternalSignal !== null && <p className="mt-2 text-xs text-[#6B7389]">From your first message to the first response from the world: {span(m.msToFirstExternalSignal)}.</p>}
+      <Card className="mt-6">{entries.length ? <ol className="space-y-3">{entries.map((e) => <li key={e.id} className="text-sm"><div className="flex flex-wrap items-center gap-2"><span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${e.seenBy === 'HIPPO' ? 'bg-[#E6F4EC] text-[#14663D]' : 'bg-[#EEF0FB] text-[#3A4359]'}`}>{e.seenBy === 'HIPPO' ? 'Seen by Hippo' : e.kind === 'DECISION' ? 'Your decision' : 'You reported'}</span><span className="font-semibold">{e.title}</span></div>{e.detail && <p className="mt-0.5 whitespace-pre-line text-xs leading-5 text-[#5B6478]">{e.detail}</p>}<div className="text-[11px] text-[#8A8F9E]">{when(e.at)}{e.sourceUrl && <> · <a href={e.sourceUrl} target="_blank" rel="noreferrer" className="underline">link</a></>}</div></li>)}</ol> : <p className="text-sm text-[#6B7389]">Nothing yet. When you do your first move, it shows up here. <Link href="/start" className="font-bold text-[#4F46E5] underline">Back to Hippo</Link></p>}</Card>
+    </div>
   </Shell>;
 }

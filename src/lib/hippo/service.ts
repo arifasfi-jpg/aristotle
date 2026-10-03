@@ -60,7 +60,7 @@ async function logAi(orgId: string, objectiveId: string, workId: string | null, 
 }
 
 // ---------------------------------------------------------------- OBJECTIVE
-export async function createObjective(ctx: { user: { id: string }; founder: { id: string; name: string | null }; org: Org & { name?: string; isDemo?: boolean } }, input: { text: string; mode: 'IDEA' | 'EXPLORE'; timeCommitment?: string | null; isDemo?: boolean; companyName?: string | null }) {
+export async function createObjective(ctx: { user: { id: string }; founder: { id: string; name: string | null }; org: Org & { name?: string; isDemo?: boolean } }, input: { text: string; mode: 'IDEA' | 'EXPLORE'; timeCommitment?: string | null; isDemo?: boolean; companyName?: string | null; understanding?: Understanding }) {
   if (input.timeCommitment) await db.founder.update({ where: { id: ctx.founder.id }, data: { timeCommitment: input.timeCommitment } });
 
   let orgId = ctx.org.id;
@@ -112,7 +112,8 @@ export async function createObjective(ctx: { user: { id: string }; founder: { id
   await logActivity({ organizationId: orgId, objectiveId: objective.id, type: 'OBJECTIVE_CREATED', actor: 'Founder', message: `Founder set an objective: ${input.text.slice(0, 160)}` });
   await remember({ organizationId: orgId, objectiveId: objective.id, kind: 'OBJECTIVE', title: input.text.slice(0, 300), status: 'FOUNDER_STATED', owner: 'Founder', source: input.isDemo ? 'Demo data' : 'Founder', refType: 'objective', refId: objective.id });
 
-  const u = await understandObjective(input.text, await companyFor({ companyName: companyNameForObjective, organizationId: orgId }), { userId: ctx.user.id, founderId: ctx.founder.id, organizationId: orgId, objectiveId: objective.id, parentType: 'REQUEST' });
+  // A conversation that already established the objective (Moves) passes its own understanding: no extra model call.
+  const u = input.understanding ? { understanding: input.understanding, meta: undefined, error: undefined } : await understandObjective(input.text, await companyFor({ companyName: companyNameForObjective, organizationId: orgId }), { userId: ctx.user.id, founderId: ctx.founder.id, organizationId: orgId, objectiveId: objective.id, parentType: 'REQUEST' });
   if (u.meta) await logActivity({ organizationId: orgId, objectiveId: objective.id, type: 'AI_CALL', actor: 'Mogli', message: `Mogli used ${u.meta.provider}/${u.meta.model} for understand`, meta: u.meta });
   if (u.error) console.error('Hippoturtle understand fell back to founder numbers:', u.error);
   const updated = await db.objective.update({ where: { id: objective.id }, data: { understanding: json(u.understanding), stage: 'UNDERSTAND' } });

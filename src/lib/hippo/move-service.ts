@@ -30,13 +30,14 @@ export const MOVE_RUN_MS = 25_000;
 const json = (v: unknown) => v as Prisma.InputJsonValue;
 const isBudgetRefusal = (e: unknown) => e instanceof Error && /AI_BUDGET_EXCEEDED/.test(e.message);
 
-export type MoveReason = 'START' | 'SIGNAL' | 'NEXT' | 'ANOTHER_WAY' | 'CANT' | 'FAILED' | 'HELP' | 'CHANGE' | 'CORRECTION' | 'DIRECTION';
+export type MoveReason = 'START' | 'SIGNAL' | 'NEXT' | 'ANOTHER_WAY' | 'CANT' | 'FAILED' | 'HELP' | 'CHANGE' | 'CORRECTION' | 'DIRECTION' | 'INSTRUCTION';
 const REASON_TEXT: Record<MoveReason, string> = {
   START: 'first Move for this business', SIGNAL: 'the world responded to the last Move — learn from it and decide what to do next',
   NEXT: 'the founder asked what is next', ANOTHER_WAY: 'the founder wants a different route to the same objective',
   CANT: "the founder can't or won't do the last Move — same objective, but a materially different activity (not the same thing through another channel or reworded)", FAILED: 'the last Move failed — learn and change route',
   HELP: 'the founder needs help doing the last Move — keep the same goal but have Hippo do far more of it: prepare every piece (the exact message for each person, who to send it to first, what to reply when they answer) so the founder only has to approve and send. Do not just rewrite the same script',
-  CHANGE: 'the founder asked to change the Move', CORRECTION: "the founder's constraints changed — the last Move no longer fits",
+  CHANGE: 'the founder asked to change the Move',
+  INSTRUCTION: "the founder gave an explicit new instruction — it overrides the current Move and Hippo's own view of what comes next. The Move must do exactly what they asked, using everything already known about the business", CORRECTION: "the founder's constraints changed — the last Move no longer fits",
   DIRECTION: 'Hippo recommended this direction — first Move for it (do not ask the founder to choose anything)',
 };
 
@@ -60,12 +61,15 @@ export async function moveContext(objectiveId: string, reason: MoveReason, opts:
   const objective = await db.objective.findUniqueOrThrow({ where: { id: objectiveId }, select: { id: true, organizationId: true, text: true, auditId: true, companyName: true } });
   const conv = await conversationFor(objectiveId);
   const s = stateOf(conv);
-  const [history, outcomes, beliefs] = await Promise.all([
+  const [history, outcomes, beliefs, said] = await Promise.all([
     // The most recent 12 (oldest first): what just happened must always be in view. Evidence reported before any Move counts too.
     db.move.findMany({ where: { objectiveId }, orderBy: { createdAt: 'desc' }, take: 12 }).then((r) => r.reverse()),
     db.outcome.findMany({ where: { objectiveId, AND: [{ OR: [{ moveId: { not: null } }, { source: 'FOUNDER_REPORTED' }] }, { OR: [{ external: null }, { external: true }] }] }, orderBy: { createdAt: 'desc' }, take: 12 }).then((r) => r.reverse()),
     beliefsFor(objective.organizationId, objectiveId),
+    // The founder's own recent words (business context the extracted fields can't hold: who, how it's funded, who's ready).
+    conv ? db.conversationMessage.findMany({ where: { conversationId: conv.id, role: 'FOUNDER' }, orderBy: { createdAt: 'desc' }, take: 12, select: { text: true } }) : Promise.resolve([]),
   ]);
+  const founderWords = said.reverse().map((m) => m.text.trim()).filter((t) => t.length > 12).map((t) => t.slice(0, 300));
   const negative = new Set(outcomes.filter((o) => o.polarity === 'NEGATIVE').map((o) => o.moveId));
   let research: string | undefined;
   if (objective.auditId) {
@@ -75,11 +79,11 @@ export async function moveContext(objectiveId: string, reason: MoveReason, opts:
   }
   const ctx: MoveContext = {
     objective: s.objective?.value || objective.text, target: s.target?.value, today: s.current_state?.value,
-    constraints: s.constraints, knownFacts: s.known_facts.map((f) => ({ key: f.key, quote: f.quote })), unknowns: s.unknowns, preferences: s.founder_preferences,
+    constraints: [...s.constraints, ...(s.lastInstruction && reason !== 'INSTRUCTION' ? [`the founder's latest explicit instruction (still applies unless they said otherwise): "${s.lastInstruction}"`] : [])], knownFacts: s.known_facts.map((f) => ({ key: f.key, quote: f.quote })), unknowns: s.unknowns, preferences: s.founder_preferences,
     profile: s.profile || {}, capacity: s.capacity || emptyCapacity(), beliefs,
     history: history.map((h) => ({ title: h.title, kind: h.kind, routeKey: h.routeKey, status: h.status, closeReason: h.closeReason, negative: negative.has(h.id) })),
     signals: outcomes.map((o) => ({ summary: o.summary, polarity: o.polarity || 'NEUTRAL', source: o.source || 'FOUNDER_REPORTED', at: o.createdAt.toISOString(), rung: o.rung ?? undefined })),
-    reason: REASON_TEXT[reason], reasonCode: reason, instruction: opts.instruction, blockedRoutes: opts.blockedRoutes || [], research, company: objective.companyName,
+    founderWords, reason: REASON_TEXT[reason], reasonCode: reason, instruction: opts.instruction, blockedRoutes: opts.blockedRoutes || [], research, company: objective.companyName,
   };
   return { ctx, objective };
 }

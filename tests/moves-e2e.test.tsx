@@ -45,6 +45,10 @@ const TAILOR_APP = mv({ kind: 'BUILD', title: 'Build the tailoring marketplace a
 const TAILOR_CONCIERGE = mv({ kind: 'TEST', title: 'Get 3 women their clothes stitched by a woman tailor who comes home', why: 'They said: no time to visit, uncomfortable with male tailors, travel costs — test if we can deliver exactly that, by hand.', bet: 'Women will book and pay for a woman tailor who comes to them', hippoWill: 'Write the offer with a trial price, a simple home-measurement checklist, and a pickup/delivery plan; list where to find women tailors nearby', needs: ['Find 1 woman tailor nearby', 'Offer it to the 3 women at the trial price'], expectedSignal: 'How many book and pay, and what goes wrong with measurements, fitting and pickup', artifactBrief: 'Offer, measurement checklist, pickup plan', routeKey: 'concierge women tailor home visit' });
 const SALARY = mv({ kind: 'TALK', title: 'Ask 10 blue-collar workers in a manufacturing cluster about salary advances', why: 'Faster to test.', bet: 'Workers want advances', hippoWill: 'Write the questions', needs: ['Visit a cluster'], expectedSignal: 'Interest', artifactBrief: 'Questions', routeKey: 'salary advance workers' });
 const MSME_MOVE = { ...mv({ kind: 'TEST', title: 'Ask 5 kirana and wholesale shop owners if they would buy stock on 30-day credit', why: 'Your MSME BNPL lives or dies on whether small businesses want to defer paying for stock.', bet: 'Shop owners will say yes to 30-day credit on stock', hippoWill: 'Write a 3-line offer and 4 questions about what they buy, how often, and what credit they get today', needs: ['Show it to 5 shop owners in Mumbai'], expectedSignal: 'How many say yes, and what they buy on credit today', artifactBrief: 'Offer and questions', routeKey: 'msme stock credit check' }), alternative: { title: 'Salary advances for factory workers', why: 'a different, possibly faster market — only if you want it' } };
+const PHARMA = ['I want to build an MSME BNPL business.', 'Pharma merchants in Mumbai. I have a strong pharma network.', 'Stockists need ₹50–75K invoice coverage for 15–21 days. Invoices are funded by NBFCs; I am the LSP. NBFCs are ready and the stockist is ready.'];
+const PLATFORM_INSTRUCTION = 'No he needs a platform. Define scope of the platform. Look at peer msme lending platforms for supply chain finance for msmes.';
+const CREDIT_RUN = mv({ kind: 'EXECUTE', title: 'Run the first ₹50K invoice credit for the ready stockist', why: 'NBFC and stockist are ready — prove the flow end to end.', bet: 'The first invoice gets funded and repaid in 21 days', hippoWill: 'Prepare the invoice checklist and the handoff note for the NBFC', needs: ['Confirm the exact invoice details from the ready stockist', 'Set the date for the credit run handoff'], expectedSignal: 'Invoice funded and repaid on time', artifactBrief: 'Checklist and handoff note', routeKey: 'first stockist credit run' });
+const PLATFORM_SCOPE = mv({ kind: 'BUILD', title: 'Define the platform scope from peer MSME supply-chain-finance platforms', why: 'The stockist needs a platform; scope it from what peer platforms do before building.', bet: 'A narrow LSP platform for pharma stockists can launch with the ready NBFCs', hippoWill: 'Compare peer MSME supply-chain-finance platforms and write the scope: stockist onboarding, invoice upload, NBFC underwriting hand-off, 15–21 day repayment, LSP dashboard', needs: ['Check the scope and mark what the stockist must have on day one'], expectedSignal: 'Which features the stockist and NBFCs say are must-haves', artifactBrief: 'Platform scope with peer comparison', routeKey: 'platform scope peer review' });
 const LUNCH = mv({ kind: 'SELL', owner: 'HIPPO', title: 'Pre-order page for home-cooked lunch boxes near offices', why: 'Office workers nearby want home food; test before cooking.', bet: 'Office workers will pre-order', hippoWill: 'Make and host the page', needs: ['Share the link with 2 office groups'], expectedSignal: 'Pre-order requests in 3 days', artifactType: 'PUBLIC_PAGE', artifactBrief: 'Lunch box pre-order page', routeKey: 'lunchbox preorder page' });
 
 function model(prompt: string): unknown {
@@ -53,6 +57,7 @@ function model(prompt: string): unknown {
   if (prompt.startsWith('MOVE ENGINE')) {
     prompts.push({ kind: 'move', text: prompt });
     const retry = prompt.includes('YOUR PREVIOUS PROPOSAL WAS REJECTED');
+    if (/objective: I want to build an MSME BNPL business/.test(prompt)) return /WHY A NEW MOVE NOW: the founder gave an explicit new instruction/.test(prompt) ? PLATFORM_SCOPE : CREDIT_RUN;
     if (/objective: [^\n]*msme/i.test(prompt)) return retry ? MSME_MOVE : SALARY; // the model tries to substitute the business
     if (/objective: .*tailor/i.test(prompt)) {
       if (!prompt.includes('\n- founder reported:')) return TAILOR_TALK;
@@ -109,6 +114,7 @@ function model(prompt: string): unknown {
     prompts.push({ kind: 'moving', text: prompt });
     if (/loved the animal round/.test(last)) return { intent: 'SIGNAL', reply: 'That’s a great sign!', signal: { summary: '5 of 6 friends finished the sample; they loved the animal round', polarity: 'POSITIVE', outcome: false } };
     if (/only have ₹500/.test(last)) return { intent: 'CORRECTION', reply: 'Noted — ₹500 it is.', budgetInr: 500 };
+    if (last === PLATFORM_INSTRUCTION) return { intent: 'CORRECTION', reply: "Got it, he wants a platform rather than a simple manual handoff. Let's pause the physical run and scope out the platform features using what peer MSME lending platforms are doing." };
     if (last === TAILOR_EVIDENCE) return { intent: 'OTHER', reply: 'Got it.' }; // the model misses it — the evidence must still be kept
     if (/^build the platform/.test(last)) return { intent: 'CHANGE_OBJECTIVE', reply: "You're circling back to the app — let's earn it first." };
     if (/^Two replied/.test(last)) return { intent: 'SIGNAL', reply: "That's useful. One person is already asking about price. Let's test whether the offer is valuable enough to pay for.", signal: { summary: 'Two cafes replied; one asked for pricing', polarity: 'POSITIVE', outcome: false } };
@@ -118,6 +124,9 @@ function model(prompt: string): unknown {
   if (prompt.startsWith('You are Hippo —')) {
     prompts.push({ kind: 'turn', text: prompt });
     if (last.startsWith('I am 10 years old')) return { intent: 'OBJECTIVE', reply: 'Love it.', ready_to_propose: true, objective: 'Quiz books for kids, written by a kid', target: '5,000 books through ecommerce', current_state: 'Just an idea', has_business_idea: true };
+    if (last === PHARMA[0]) return { intent: 'OBJECTIVE', reply: 'MSME BNPL — who are the merchants?', ready_to_propose: false, has_business_idea: true };
+    if (last === PHARMA[1]) return { intent: 'ANSWER', reply: 'Strong network helps. What do the stockists need?', ready_to_propose: false, has_business_idea: true };
+    if (last === PHARMA[2]) return { intent: 'ANSWER', reply: 'Clear.', ready_to_propose: true, has_business_idea: true };
     // A model that rewrites the founder's business into an adjacent one (the live MSME BNPL bug).
     if (/msme buynow paylater/i.test(last)) return { intent: 'OBJECTIVE', reply: 'An MSME buy-now-pay-later business, nice. Mumbai first?', ready_to_propose: false, has_business_idea: false, objective: 'Hyper-local salary advance brokerage for blue-collar workers in Mumbai' };
     if (/^Yes Mumbai 1st/.test(last)) return { intent: 'ANSWER', reply: 'Got it.', ready_to_propose: true, has_business_idea: false, objective: 'Salary advance brokerage for blue-collar workers' };
@@ -159,6 +168,7 @@ async function mods() {
   const view = async () => { const r = await conv.GET(); await jobs.settleDetached(); return (await r.json()) as Row; };
   const act = async (id: string, b: Row) => { const r = await moveRoute.POST(new Request('http://hippo.test/api/hippo/moves/x', { method: 'POST', headers: { 'content-type': 'application/json', 'x-real-ip': addr }, body: JSON.stringify(b) }), { params: Promise.resolve({ id }) }); await jobs.settleDetached(); const body = (await r.json()) as Row; return { status: r.status, body: body.thinking ? await view() : body }; }; // the UI polls while Hippo is thinking
   const respond = async (slug: string, b: Row) => pub.POST(new Request(`http://hippo.test/api/p/${slug}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-real-ip': ip() }, body: JSON.stringify(b) }), { params: Promise.resolve({ slug }) });
+  view_ = view;
   return { db, jobs, say, view, act, respond };
 }
 // What the founder must never be shown in the "I don't know" journey: report furniture, scores, choosing a research route.
@@ -173,6 +183,7 @@ async function cafeStart(say: (t: string) => Promise<Row>) {
   const v = await say('No money, 2 hours a day');
   return { v, before };
 }
+let view_: () => Promise<Row> = async () => ({});
 const lastHippo = (v: Row) => [...v.messages].reverse().find((m: Row) => m.role === 'HIPPO').text as string;
 
 describe.skipIf(!E2E)('V1 Moves (real Postgres)', () => {
@@ -459,11 +470,13 @@ describe.skipIf(!E2E)('V1 Moves (real Postgres)', () => {
     expect(lastHippo(v)).toMatch(/^Given what just happened — I spoke to 3 women\. They all said they don't have time to visit tailors[\s\S]* — the next thing we should do is: Get 3 women their clothes stitched by a woman tailor who comes home\./);
     expect(v.move.title).toBe(TAILOR_CONCIERGE.move.title);
     expect(await db.move.count({ where: { objectiveId, title: { contains: 'Interview' } } })).toBe(0);
-    // Pushing back ("build the platform") never wipes the business; the evidence-backed Move stays, and an app is refused.
+    // "build the platform" never wipes the business; as an explicit instruction it replaces the current Move.
+    const concierge = v.move.id;
     v = await say('build the platform');
     expect(v.phase).toBe('MOVING');
-    expect(v.move.title).toBe(TAILOR_CONCIERGE.move.title);
-    expect(lastHippo(v)).toMatch(/circling back to the app/);
+    expect(v.state.objective.value).toBe(TAILOR);
+    expect(await db.move.findUnique({ where: { id: concierge } })).toMatchObject({ status: 'SUPERSEDED' });
+    expect(prompts.filter((p) => p.kind === 'move').at(-1)!.text).toMatch(/explicit new instruction[^\n]*— founder said: "build the platform"/);
     const { validateMove, emptyCapacity } = await import('@/lib/hippo/moves');
     const ctx = { objective: 'tailoring', constraints: [], knownFacts: [], unknowns: [], preferences: [], profile: {}, capacity: emptyCapacity(), beliefs: [], history: [], signals: [{ summary: TAILOR_EVIDENCE, polarity: 'POSITIVE', source: 'FOUNDER_REPORTED', at: '' }], reason: 'NEXT', blockedRoutes: [] };
     expect(validateMove({ ...(TAILOR_APP.move as Record<string, unknown>), alternative: null, reply: '', beliefs: [] } as never, ctx).problems.join()).toMatch(/PREMATURE_SOFTWARE/);
@@ -535,6 +548,41 @@ describe.skipIf(!E2E)('V1 Moves (real Postgres)', () => {
     expect(v.move).toBeNull();
     expect(v.state.directions ?? []).toEqual([]);
     expect(JSON.stringify(v.messages)).not.toMatch(/salary|blue-collar/i);
+  }, 60_000);
+
+  it('REGRESSION (live): MSME BNPL pharma LSP — "define the platform / look at peers" replaces the credit run; "yes" accepts the NEW Move; context kept', async () => {
+    const { db, say } = await mods();
+    jar = new Map();
+    for (const m of PHARMA) await say(m);
+    let v = await view_();
+    expect(v.move.title).toBe(CREDIT_RUN.move.title);
+    const creditRun = v.move.id;
+    // 3. "I did it" on a Move nobody has accepted yet is not completion.
+    v = await say('I did it');
+    expect(lastHippo(v)).toMatch(/^Just to be sure — "Run the first ₹50K invoice credit for the ready stockist" hasn't been started yet/);
+    expect(await db.move.findUnique({ where: { id: creditRun } })).toMatchObject({ status: 'READY', actedAt: null });
+    // 1/4/5/6. The explicit instruction wins over the current Move.
+    v = await say(PLATFORM_INSTRUCTION);
+    expect(v.messages.some((m: Row) => m.kind === 'INSTRUCTION' && /^Got it, he wants a platform rather than a simple manual handoff[\s\S]*set the previous move aside/.test(m.text))).toBe(true);
+    expect(await db.move.findUnique({ where: { id: creditRun } })).toMatchObject({ status: 'SUPERSEDED', actedAt: null });
+    const engine = prompts.filter((p) => p.kind === 'move').at(-1)!.text;
+    expect(engine).toContain(`WHY A NEW MOVE NOW: the founder gave an explicit new instruction — it overrides the current Move`);
+    expect(engine).toContain(`founder said: "${PLATFORM_INSTRUCTION}"`);
+    expect(engine).toContain('objective: I want to build an MSME BNPL business.');          // business context kept
+    expect(engine).toMatch(/WHAT THE FOUNDER TOLD US[\s\S]*Pharma merchants in Mumbai\. I have a strong pharma network[\s\S]*₹50–75K invoice coverage for 15–21 days\. Invoices are funded by NBFCs; I am the LSP\. NBFCs are ready and the stockist is ready/);
+    expect(engine).not.toMatch(/YOUR PREVIOUS PROPOSAL WAS REJECTED/);                        // the founder's ask is not second-guessed
+    expect(v.move).toMatchObject({ title: PLATFORM_SCOPE.move.title, status: 'READY' });
+    expect(v.move.artifact.type).toBe('DOCUMENT');
+    // 2. "Yes" accepts the NEW Move; the credit run is never resurrected.
+    v = await say('Yes');
+    expect(v.move).toMatchObject({ title: PLATFORM_SCOPE.move.title, status: 'APPROVED' });
+    expect(lastHippo(v)).not.toMatch(/invoice details|credit run handoff/i);
+    expect(await db.move.findUnique({ where: { id: creditRun } })).toMatchObject({ status: 'SUPERSEDED' });
+    expect(await db.move.count({ where: { objectiveId: (await db.move.findUnique({ where: { id: creditRun } })).objectiveId, title: CREDIT_RUN.move.title, status: { not: 'SUPERSEDED' } } })).toBe(0);
+    expect(v.state.objective.value).toBe('I want to build an MSME BNPL business.');
+    expect(JSON.stringify(v.messages)).not.toMatch(/salary|blue-collar/i);
+    // The instruction stays in force for later Moves.
+    expect(v.state.lastInstruction).toBe(PLATFORM_INSTRUCTION);
   }, 60_000);
 
   it('UI + public surface: one pinned Move card, plain words, the native page (draft hidden, views and self-tests not counted) and the Ledger', async () => {

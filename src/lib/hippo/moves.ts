@@ -196,7 +196,7 @@ export type MoveContext = {
   objective: string; target?: string; today?: string; constraints: string[]; knownFacts: { key: string; quote: string }[]; unknowns: string[];
   preferences: string[]; profile: FounderProfile; capacity: Capacity; beliefs: { statement: string; confidence: string; evidence: string }[];
   history: PastMove[]; signals: { summary: string; polarity: string; source: string; at: string; rung?: number }[];
-  reason: string; reasonCode?: string; instruction?: string; blockedRoutes: string[]; research?: string; company?: string | null;
+  founderWords?: string[]; reason: string; reasonCode?: string; instruction?: string; blockedRoutes: string[]; research?: string; company?: string | null;
 };
 
 const STOP = new Set(['the', 'a', 'an', 'to', 'of', 'and', 'or', 'for', 'with', 'on', 'in', 'at', 'by', 'any', 'my', 'your', 'our', 'build', 'make', 'approach', 'call', 'talk', 'visit', 'go', 'sell', 'use', 'run', 'do', 'create', 'develop', 'spend', 'post', 'be', 'cold']);
@@ -245,13 +245,14 @@ export function validateMove(m: ProposedMove, ctx: MoveContext): { ok: boolean; 
     if (ws.length && ws.every((w) => mentions(text, w))) problems.push(`CONTRADICTS_PREFERENCE: the founder does not want to "${a}".`);
   }
   if (m.artifactType === 'PUBLIC_PAGE' && m.owner !== 'HIPPO') problems.push('WRONG_OWNER: Hippo hosts public pages itself (owner HIPPO).');
-  if (m.kind === 'RESEARCH' && !m.researchJustification) problems.push('RESEARCH_NOT_JUSTIFIED: prefer a Move that reaches a real person; research only when it is clearly the highest-leverage step (say why).');
+  if (m.kind === 'RESEARCH' && !m.researchJustification && !((ctx.reasonCode ?? ctx.reason) === 'INSTRUCTION' && ctx.instruction)) problems.push('RESEARCH_NOT_JUSTIFIED: prefer a Move that reaches a real person; research only when it is clearly the highest-leverage step (say why).');
   if ((ctx.capacity.existingCustomers ?? 0) > 0 && /\b(first|initial)\s+(\d+\s+)?(customers?|buyers?|sales?|users?)\b/.test(n0(text))) problems.push(`IGNORES_KNOWN_FACT: the founder already has ${ctx.capacity.existingCustomers} customers.`);
   // The founder's stated customer is authoritative: a Move may not quietly serve someone else (alternatives go in "alternative").
   const off = offObjective(ctx.objective, [m.title, m.why, m.hippoWill, m.artifactBrief, ...m.needs].join(' '));
   if (off) problems.push(`OFF_OBJECTIVE: ${off}. Stay on the founder's stated business; put a different opportunity in "alternative" and let them choose.`);
-  // Learning: what the world already said changes what the next Move may be.
-  const L = learningStage(ctx.signals, ctx.history);
+  // Learning: what the world already said changes what the next Move may be — unless the founder explicitly asked for this.
+  const founderAsked = (ctx.reasonCode ?? ctx.reason) === 'INSTRUCTION' && Boolean(ctx.instruction);
+  const L = founderAsked ? learningStage([], []) : learningStage(ctx.signals, ctx.history);
   const said = n0([m.title, m.hippoWill, m.artifactBrief].join(' '));
   const commercial = /(₹|\b(price|pricing|pay|paid|book|booking|order|pre-?order|trial|deliver|delivery|pickup|sell|offer|charge)\b)/.test(said);
   if (L.problem && !L.paid && DISCOVERY_RE.test(said) && !commercial && !m.researchJustification)
@@ -338,6 +339,7 @@ BUSINESS (founder's words are authoritative):
 - objective: ${ctx.objective}
 - target: ${ctx.target || 'not stated'} | today: ${ctx.today || 'not stated'}
 - founder said: ${ctx.knownFacts.map((f) => `"${f.quote}"`).join('; ') || 'nothing quantified yet'}
+${ctx.founderWords?.length ? `WHAT THE FOUNDER TOLD US (their own words, oldest first — authoritative context; never drop or replace it):\n${ctx.founderWords.map((w) => `- "${w}"`).join('\n')}\n` : ''}
 - unknowns: ${ctx.unknowns.join('; ') || 'none listed'}
 WORKING BELIEFS (Hippo's current hypotheses — update them):
 ${ctx.beliefs.map((b) => `- [${b.confidence}] ${b.statement} (evidence: ${b.evidence || 'none yet'})`).join('\n') || '- none yet'}
@@ -448,6 +450,15 @@ export const proofIn = (text: string) => text.match(URL_RE)?.[0];
  * quoted ₹70") → a Signal. Deterministic first pass; the model refines nuance. Money received is a verified outcome
  * only with proof; otherwise it stays founder-reported.
  */
+/** An explicit instruction about what Hippo should do next ("Define the scope of the platform", "Look at peer lenders",
+ *  "No, he needs a platform"). It outranks the current Move: it is a change of plan, never completion or acceptance. */
+export function readInstruction(text: string): boolean {
+  const t = n0(text).replace(/[“”"]/g, '');
+  const verb = '(define|scope( out)?|design|draft|write|build|create|make|research|look (at|into)|analy[sz]e|compare|study|benchmark|find|list|map( out)?|plan|outline|prepare|spec( out)?|give me|show me|work out|figure out|focus on|switch to|move to|start (on|with)|let\'?s (do|build|define|focus on|move to|start on))';
+  return new RegExp(`(^|[.!?;]\\s*|\\b(now|please|just|then|instead|but|can you|could you|you should|i want you to|let'?s)\\s+)${verb}\\b`).test(t)
+    || /\b(he|she|they|we|i|the (stockist|customer|client|nbfc|partner)s?) (really )?(needs?|wants?|requires?) (a|an|the|to have an?) (platform|app|product|system|portal|dashboard|tool|website|software)\b/.test(t);
+}
+
 /** The founder reports what real people told them ("I talked to 3 women, they said …"). */
 export function readEvidence(text: string): boolean {
   const t = n0(text);

@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   consequentialReasons, emptyCapacity, fallbackMove, materialChange, mergeCapacity, mergeProfile, movesEnabled, movingControl, normaliseMove,
-  inventedClaims, isNewBusiness, learningStage, readEvidence, readFounderSignals, readSignal, stripClaims, validateMove, type MoveContext, type ProposedMove,
+  inventedClaims, isNewBusiness, learningStage, readEvidence, readInstruction, readFounderSignals, readSignal, stripClaims, validateMove, type MoveContext, type ProposedMove,
 } from '../src/lib/hippo/moves';
 
 const move = (o: Partial<ProposedMove> = {}): ProposedMove => ({
@@ -162,6 +162,23 @@ describe('learning from what the world said', () => {
     expect(isNewBusiness('build the platform', 'Women-focused tailoring marketplace in Mumbai')).toBe(false);
     expect(isNewBusiness('just make the app', 'Women-focused tailoring marketplace in Mumbai')).toBe(false);
     expect(isNewBusiness('Actually I want to open a bakery in Pune instead', 'Women-focused tailoring marketplace in Mumbai')).toBe(true);
+  });
+});
+
+describe('the latest explicit founder instruction outranks the current Move', () => {
+  it('recognises instructions — and does not mistake acceptance, completion, outcomes or questions for one', () => {
+    for (const x of ['No he needs a platform. Define scope of the platform. Look at peer msme lending platforms for supply chain finance for msmes.',
+      'Define the platform', 'Look at peer MSME lending platforms', 'Give me directions on platform.', 'I have done the validations. Now define the platform.', 'No, he needs a platform', 'build the platform'])
+      expect([x, readInstruction(x)]).toEqual([x, true]);
+    for (const x of ['Yes', 'I did it', 'ok', 'Two replied and one asked for pricing.', 'what grade is this for?', "I don't want to give it to friends", 'I want to start a bakery'])
+      expect([x, readInstruction(x)]).toEqual([x, false]);
+  });
+  it('the founder\'s explicit ask is not refused by Hippo\'s own sequencing rules', () => {
+    const signals = [{ summary: 'NBFCs are ready and the stockist is ready; they need it', polarity: 'POSITIVE', source: 'FOUNDER_REPORTED', at: '' }];
+    const platform = move({ kind: 'BUILD', title: 'Define the platform scope from peer supply-chain-finance platforms' });
+    expect(validateMove(platform, ctx({ signals })).problems.join()).toMatch(/PREMATURE_SOFTWARE/);
+    expect(validateMove(platform, ctx({ signals, reasonCode: 'INSTRUCTION', instruction: 'Define scope of the platform' })).ok).toBe(true);
+    expect(validateMove(move({ kind: 'RESEARCH', title: 'Compare peer MSME lending platforms' }), ctx({ reasonCode: 'INSTRUCTION', instruction: 'Look at peer MSME lending platforms' })).ok).toBe(true);
   });
 });
 

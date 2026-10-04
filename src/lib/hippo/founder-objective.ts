@@ -26,7 +26,7 @@ export const clarifyQuestion = (domain: string) =>
 
 // Who a business serves, grouped so that synonyms match (an MSME is a merchant / shop owner / supplier; a worker is an employee).
 const SEGMENTS: Record<string, RegExp> = {
-  SMALL_BUSINESSES: /\b(msmes?|smes?|small (and medium )?business(es)?|merchants?|shop ?owners?|shopkeepers?|retailers?|kiranas?|wholesalers?|distributors?|suppliers?|traders?|b2b|businesses)\b/,
+  SMALL_BUSINESSES: /\b(msmes?|smes?|small (and medium )?business(es)?|merchants?|shop ?owners?|shopkeepers?|retailers?|kiranas?|wholesalers?|distributors?|stockists?|chemists?|pharmacies|suppliers?|traders?|b2b|businesses)\b/,
   EMPLOYEES: /\b(employees?|workers?|blue[- ]collar|salaried|staff|labou?r(ers)?|salary|payday|earned wage)\b/,
   STUDENTS: /\b(students?|learners?|edtechs?|courses?)\b/,
   CONSUMERS: /\b(consumers?|shoppers?|individuals?|households?)\b/,

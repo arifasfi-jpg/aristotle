@@ -13,7 +13,7 @@ import { createObjective } from './service';
 import type { Understanding } from './types';
 import {
   CONSEQUENCE_LABEL, materialChange, mergeCapacity, mergeProfile, movingControl, movingTurnPrompt, MOVING_TURN_SCHEMA, parseMovingTurn,
-  isNewBusiness, proofIn, readEvidence, readFounderSignals, readSignal, validateMove, emptyCapacity, type MoveControl, type ProposedMove,
+  isNewBusiness, proofIn, readEvidence, readInstruction, readFounderSignals, readSignal, validateMove, emptyCapacity, type MoveControl, type ProposedMove,
 } from './moves';
 import {
   activeMoveJob, approveMove, recordEarlyEvidence, currentMove, markActed, moveContext, pageUrl, parkMove, recordSignal, requestMove, rerouteMove, stateOf, whyMove,
@@ -105,7 +105,10 @@ export async function applyMoveAction(ctx: { userId: string; founderId: string }
     }
     case 'NOT_NOW': await parkMove(move.id, actor, true); return "Parked. Nothing's lost — say “bring it back” when you're ready.";
     case 'RESUME': await parkMove(move.id, actor, false); return "Back on the table.";
-    case 'DID_IT': await markActed(move.id, actor, opts.proof); return opts.proof ? 'Got it — I saved the link. What happened? Tell me even if nobody replied.' : 'Nice. What happened? Tell me even if nobody replied — and paste a link or screenshot if you have one.';
+    case 'DID_IT':
+      // "I did it" completes only a Move the founder accepted and is carrying out — never one that is merely proposed.
+      if (!['APPROVED', 'LIVE'].includes(move.status)) return `Just to be sure — "${move.title.replace(/\.$/, '')}" hasn't been started yet. Say "yes" to take it on, or tell me what you want to do instead.`;
+      await markActed(move.id, actor, opts.proof); return opts.proof ? 'Got it — I saved the link. What happened? Tell me even if nobody replied.' : 'Nice. What happened? Tell me even if nobody replied — and paste a link or screenshot if you have one.';
     case 'WHY': return whyMove(move.id);
     case 'NEXT':
       if (!['LIVE', 'SIGNALLED'].includes(move.status)) {
@@ -208,6 +211,18 @@ export async function postMoveMessage(ctx: Ctx, conv: { id: string; phase: strin
     // Constraints the founder stated (deterministic reading + the model's literal extraction).
     s.capacity = mergeCapacity(s.capacity, { avoid: turn?.avoid ?? [], assets: turn?.assets ?? [], ...(turn?.budgetInr !== undefined && read.capacity.budgetInr === undefined ? { budgetInr: turn.budgetInr } : {}), ...(turn?.existingCustomers !== undefined && read.capacity.existingCustomers === undefined ? { existingCustomers: turn.existingCustomers } : {}) });
     await db.conversation.update({ where: { id: conv.id }, data: { state: json(s) } });
+    // The founder's latest explicit instruction outranks the current Move: replace it now (so a later "yes" can never
+    // approve the old one, and "I did it" can never complete it). Anything they reported alongside is still kept.
+    if (readInstruction(text) && !(intent === 'CHANGE_OBJECTIVE' && isNewBusiness(text, s.objective?.value || '') && !/\b(platform|app|product|scope)\b/i.test(text))) {
+      if (move && sig && (intent === 'SIGNAL' || readSignal(text))) await recordSignal(move.id, { summary: turn?.signal?.summary || text.slice(0, 400), polarity: turn?.signal?.polarity ?? sig.polarity, rung: 4, source: 'FOUNDER_REPORTED' });
+      if (move) await db.move.update({ where: { id: move.id }, data: { status: ['LIVE', 'SIGNALLED'].includes(move.status) ? 'DONE' : 'SUPERSEDED', closeReason: `founder's new instruction: ${text.slice(0, 160)}` } });
+      s.lastInstruction = text.trim().slice(0, 400);
+      await db.conversation.update({ where: { id: conv.id }, data: { state: json(s) } });
+      await requestMove(objective, ctx.user.id, 'INSTRUCTION', { instruction: text.trim().slice(0, 600), fromMoveId: move?.id ?? null });
+      const ack = turn?.reply && !['APPROVE', 'ACTION_DONE', 'NEXT'].includes(turn.intent) ? turn.reply : 'Got it — that changes what we do next.';
+      await say(`${ack}\n\nI've set the previous move aside and I'm setting this up now — it'll appear above in a moment.`, { kind: 'INSTRUCTION' });
+      return;
+    }
     const changed = materialChange(before.cap, s.capacity!, before.prof, s.profile || {});
     if ((changed || intent === 'CORRECTION') && move) {
       // A material correction can invalidate the current Move immediately.

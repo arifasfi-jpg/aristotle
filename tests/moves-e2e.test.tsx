@@ -28,6 +28,8 @@ const SAMPLE = mv({ title: 'Make a 10-question sample and try it on 5 friends', 
 const PAGE = mv({ kind: 'SELL', owner: 'HIPPO', title: 'Put up a pre-order page parents can respond to', why: 'Kids liked it — now see if parents will want to buy it.', bet: 'Parents of 8–12 year olds will register interest', hippoWill: 'Make and host the page; I see every response', needs: ['A parent to say OK', 'Share the link in a parents WhatsApp group'], expectedSignal: 'Parents leaving their contact to pre-order', artifactType: 'PUBLIC_PAGE', artifactBrief: 'Pre-order interest page', routeKey: 'parents preorder page', beliefs: [{ key: 'kids-enjoy', statement: 'Kids enjoy the quizzes, especially animals', confidence: 'MEDIUM', evidence: '5 of 6 friends finished the sample', disprovedIf: 'A wider group of kids does not finish it' }] });
 const LIBRARY = mv({ kind: 'TEST', title: 'Ask your school librarian to try the sample with a class', why: 'A teacher can put it in front of many kids at once.', bet: 'A class will enjoy it', hippoWill: 'Write a short note for the librarian', needs: ['Give the note to the librarian'], expectedSignal: 'Whether the librarian agrees and what the class says', artifactBrief: 'A note for the librarian', routeKey: 'school library test' });
 const PRINT_RUN = mv({ kind: 'BUILD', title: 'Print 50 copies at a local shop', why: 'Have stock to sell', bet: 'People will buy printed copies', hippoWill: 'Find a printer and prepare the files', needs: ['Pay the printer'], costInr: 2000, costBasis: 'estimate: local print shop', expectedSignal: 'Copies in hand', artifactBrief: 'Print-ready file', routeKey: 'print fifty copies' });
+const CLASS = mv({ kind: 'SELL', title: 'Offer one Sunday cooking class to 5 people you know', why: 'See if people will pay to learn from you before renting anything.', bet: 'Friends will book a class', hippoWill: 'Write the invite and a simple menu', needs: ['Send the invite to 10 people'], expectedSignal: 'How many say yes', artifactBrief: 'Class invite', routeKey: 'sunday class invite' });
+const TIFFIN = mv({ kind: 'SELL', owner: 'HIPPO', title: 'Pre-order page for home tiffins in your society', why: 'Neighbours are the fastest people to reach from home.', bet: 'Neighbours will pre-order a week of tiffins', hippoWill: 'Make the page and the WhatsApp message', needs: ['Post the message in your society group'], expectedSignal: 'Pre-orders in 3 days', artifactType: 'PUBLIC_PAGE', artifactBrief: 'Tiffin pre-order page', routeKey: 'society tiffin preorder' });
 const LUNCH = mv({ kind: 'SELL', owner: 'HIPPO', title: 'Pre-order page for home-cooked lunch boxes near offices', why: 'Office workers nearby want home food; test before cooking.', bet: 'Office workers will pre-order', hippoWill: 'Make and host the page', needs: ['Share the link with 2 office groups'], expectedSignal: 'Pre-order requests in 3 days', artifactType: 'PUBLIC_PAGE', artifactBrief: 'Lunch box pre-order page', routeKey: 'lunchbox preorder page' });
 
 function model(prompt: string): unknown {
@@ -40,6 +42,8 @@ function model(prompt: string): unknown {
     if (prompt.includes('money available: ₹500') && !retry) return PRINT_RUN;                         // over budget → must be rejected
     if (prompt.includes('the last Move failed') && !retry) return PAGE;                                 // repeats the failed route → rejected
     if (prompt.includes('money available: ₹500') || prompt.includes('the last Move failed') || prompt.includes("can't or won't") || prompt.includes('different route')) return LIBRARY;
+    if (prompt.includes('Chosen direction: Weekend cooking classes')) return CLASS;
+    if (prompt.includes('Chosen direction: Tiffin')) return TIFFIN;
     if (prompt.includes('Chosen direction')) return LUNCH;
     if (prompt.includes('WHAT THE WORLD SAID:\n- founder reported') || prompt.includes('seen by Hippo')) return prompt.includes('seen by Hippo') ? mv({ kind: 'SELL', title: 'Reply to Priya and ask what price feels fair', why: 'A real parent responded.', bet: 'She will name a price', hippoWill: 'Draft the reply', needs: ['Send the reply'], expectedSignal: 'A price she would pay', artifactBrief: 'Reply draft', routeKey: 'ask first parent price' }) : PAGE;
     return SAMPLE;
@@ -52,6 +56,10 @@ function model(prompt: string): unknown {
   }
   if (prompt.includes("doesn't know what yet")) {
     prompts.push({ kind: 'directions', text: prompt });
+    if (/from home|online/.test(prompt)) return { directions: [ // only two genuinely good options — not padded to three
+      { title: 'Tiffin service for your society', whoItServes: 'working families nearby', whyYou: 'You can cook at home in your free hours', firstTest: 'A pre-order page shared in your society group', objective: 'I want to run a home tiffin service for my society', firstMoveCostInr: 0, firstMoveDays: 3 },
+      { title: 'Home tuition for kids', whoItServes: 'parents nearby', whyYou: 'Fits 2–3 hours a day', firstTest: 'Offer a free trial class to 3 parents', objective: 'I want to teach kids at home', firstMoveCostInr: 0, firstMoveDays: 5 },
+    ], recommended: 0, why: 'you can start without spending money, it fits your hours at home, and we will know within days if neighbours want it' };
     return { directions: [
       { title: 'Home-cooked lunch boxes', whoItServes: 'office workers nearby', whyYou: 'You cook well', firstTest: 'Pre-order page shared in 2 office groups', objective: 'I want to sell home-cooked lunch boxes to office workers', firstMoveCostInr: 0, firstMoveDays: 3 },
       { title: 'Weekend cooking classes', whoItServes: 'young professionals', whyYou: 'You cook well', firstTest: 'Offer one class to 5 people', objective: 'I want to run weekend cooking classes', firstMoveCostInr: 500, firstMoveDays: 7 },
@@ -102,6 +110,8 @@ async function mods() {
   const respond = async (slug: string, b: Row) => pub.POST(new Request(`http://hippo.test/api/p/${slug}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-real-ip': ip() }, body: JSON.stringify(b) }), { params: Promise.resolve({ slug }) });
   return { db, jobs, say, view, act, respond };
 }
+// What the founder must never be shown in the "I don't know" journey: report furniture, scores, choosing a research route.
+const NOT_FOUNDER_FACING = /\d+\s*\/\s*100|score|pathway|research question|evidence|sources|you decide|which (one|option) do you (want|choose)|lens|hypothes|dig in|report/i;
 const lastHippo = (v: Row) => [...v.messages].reverse().find((m: Row) => m.role === 'HIPPO').text as string;
 
 describe.skipIf(!E2E)('V1 Moves (real Postgres)', () => {
@@ -219,7 +229,7 @@ describe.skipIf(!E2E)('V1 Moves (real Postgres)', () => {
     expect(v.move.title).toBe(LIBRARY.move.title);
   }, 60_000);
 
-  it('CANONICAL "₹1 lakh but no idea how": at most two questions, three directions, one recommended, then a first Move', async () => {
+  it('CANONICAL "₹1 lakh but no idea how": at most two questions, then Hippo recommends one direction and it becomes the first Move (no report, no picking)', async () => {
     const { db, say } = await mods();
     jar = new Map();
     let v = await say(LAKH);
@@ -230,13 +240,58 @@ describe.skipIf(!E2E)('V1 Moves (real Postgres)', () => {
     v = await say('I can put in ₹10,000 and 10 hours a week');
     expect(v.state.capacity).toMatchObject({ budgetInr: 10000, hoursPerWeek: 10 });
     expect(v.state.directions).toHaveLength(3);
-    expect(lastHippo(v)).toMatch(/^Okay — you don't need to know yet[\s\S]*A\) Home-cooked lunch boxes[\s\S]*I'd start with A/);
-    expect(prompts.filter((p) => p.kind === 'directions').at(-1)!.text).toContain('costing at most ₹2000');
-    expect(v.quick[0]).toBe('Start with A');
-    v = await say('Start with A');
+    const said = v.messages.filter((m: Row) => m.role === 'HIPPO').map((m: Row) => m.text).join('\n');
+    expect(said).toMatch(/I think we should start with home-cooked lunch boxes — daily demand, and you can test it this week for free\./);
+    expect(said).toMatch(/I don't want you spending money building anything yet\. First step: Pre-order page shared in 2 office groups\. I'm setting that up now\./);
+    expect(said).toMatch(/I also considered B\) weekend cooking classes and C\) festival sweets boxes — just say the letter\./);
+    expect(said).not.toMatch(NOT_FOUNDER_FACING);
+    // Hippo decided: the first Move exists without the founder picking anything.
     expect(v.move).toMatchObject({ title: LUNCH.move.title, owner: 'HIPPO', consequential: true, needsGuardian: false });
+    expect(v.quick).toEqual(expect.arrayContaining(['Yes', 'Try B instead', 'Try C instead']));
     expect(prompts.filter((p) => p.kind === 'move').at(-1)!.text).toContain('Chosen direction: Home-cooked lunch boxes');
+    const directions = prompts.filter((p) => p.kind === 'directions').at(-1)!.text;
+    expect(directions).toContain('costing at most ₹2000');
+    expect(directions).toMatch(/never name them\): obvious route[\s\S]*international analogue[\s\S]*founder specific/); // lenses: internal only
     expect(await db.objective.count({ where: { text: { contains: 'lunch boxes' } } })).toBeGreaterThanOrEqual(1);
+    expect(v.messages.filter((m: Row) => ['HANDOFF', 'RESULT'].includes(m.kind))).toEqual([]); // no research handoff, no report
+    expect(await db.audit.count({ where: { paymentStatus: 'paid' } })).toBe(0);
+    // The founder can still go another way: "Try B instead" replaces the Move with one for that direction.
+    const first = v.move.id;
+    v = await say('Try B instead');
+    expect(await db.move.findUnique({ where: { id: first } })).toMatchObject({ status: 'SUPERSEDED' });
+    expect(v.move.title).toBe(CLASS.move.title);
+    expect(v.quick).toEqual(expect.arrayContaining(['Try A instead', 'Try C instead']));
+    // A signal that merely starts with "a" is never mistaken for choosing direction A.
+    v = await say('a few friends said maybe');
+    expect(v.move.title).toBe(CLASS.move.title);
+  }, 60_000);
+
+  it('"2–3 hours a day, ₹20,000/month from home, don\'t know what": one question at most, a founder-fit recommendation and a free first Move', async () => {
+    const { say } = await mods();
+    jar = new Map();
+    let v = await say("I have 2–3 hours a day. I want to make ₹20,000/month from home. I don't know what business to start.");
+    expect(v.state.capacity.hoursPerWeek).toBe(14);
+    expect(lastHippo(v)).toMatch(/What are you good at/);
+    v = await say('I cook well and my neighbours like my food');
+    expect(v.messages.filter((m: Row) => m.kind === 'IDEA_QUESTION')).toHaveLength(1); // time was already known: no second question
+    const said = v.messages.filter((m: Row) => m.role === 'HIPPO').map((m: Row) => m.text).join('\n');
+    expect(said).toMatch(/start with tiffin service for your society — you can start without spending money/);
+    expect(said).toMatch(/I also considered B\) home tuition for kids — just say the letter/); // two good options, not padded to three
+    expect(v.move).toMatchObject({ title: TIFFIN.move.title, cost: 'Free' });
+    expect(JSON.stringify(v.messages)).not.toMatch(NOT_FOUNDER_FACING);
+  }, 60_000);
+
+  it('"I want to sell something online but I don\'t know what": no report — Hippo asks, decides and creates the first Move', async () => {
+    const { say } = await mods();
+    jar = new Map();
+    let v = await say("I want to sell something online but I don't know what.");
+    expect(v.move).toBeNull();
+    v = await say('I know a lot about phones');
+    v = await say("No money really, maybe 5 hours a week");
+    expect(v.messages.filter((m: Row) => m.kind === 'IDEA_QUESTION').length).toBeLessThanOrEqual(2);
+    expect(v.move).not.toBeNull();
+    expect(v.messages.some((m: Row) => m.role === 'HIPPO' && /I think we should start with/.test(m.text))).toBe(true);
+    expect(JSON.stringify(v.messages)).not.toMatch(NOT_FOUNDER_FACING);
   }, 60_000);
 
   it('UI + public surface: one pinned Move card, plain words, the native page (draft hidden, views and self-tests not counted) and the Ledger', async () => {

@@ -61,12 +61,13 @@ export async function moveView(move: NonNullable<Awaited<ReturnType<typeof curre
 /** Quick replies for the current state: only the controls that make sense now. */
 export function quickReplies(m: { status: string; owner: string; artifactType?: string } | null, s: BusinessState, thinking: boolean): string[] {
   if (thinking) return [];
-  if (!m) return s.directions?.length ? [`Start with ${'ABC'[s.recommended ?? 0]}`, ...[0, 1, 2].filter((i) => i !== (s.recommended ?? 0)).map((i) => 'ABC'[i]), 'Something else'] : [];
+  const alts = (s.directions ?? []).map((_, i) => i).filter((i) => i !== (s.chosen ?? s.recommended ?? 0)).map((i) => `Try ${'ABC'[i]} instead`);
+  if (!m) return s.directions?.length ? [`Start with ${'ABC'[s.recommended ?? 0]}`, ...alts, 'Something else'] : [];
   if (m.status === 'PARKED') return ['Bring it back', 'Try another way'];
   if (m.status === 'LIVE') return m.owner === 'HIPPO' ? ["What's next?", 'This failed'] : ['No one replied', 'This failed', 'Help me do this'];
   if (m.status === 'SIGNALLED') return ["What's next?"];
   if (m.status === 'APPROVED') return ['I did it', 'Help me do this', "I can't do this"];
-  return ['Yes', 'Try another way', 'Help me do this', 'Not now'];
+  return ['Yes', 'Try another way', 'Help me do this', 'Not now', ...(s.chosen !== undefined ? alts : [])];
 }
 
 /** Current Move, whether Hippo is still working on the next one, and the quick replies. Resumes a parked job. */
@@ -123,19 +124,29 @@ async function handoff(ctx: Ctx, convId: string, s: BusinessState, reason: 'STAR
   return { objective, start: () => requestMove(objective, ctx.user.id, reason, { instruction }) };
 }
 
+async function startDirection(ctx: Ctx, convId: string, s: BusinessState, i: number) {
+  const d = s.directions![i];
+  s.objective = { value: d.objective.slice(0, 300), provenance: 'FOUNDER' };
+  s.noIdea = false; s.chosen = i;
+  const h = await handoff(ctx, convId, s, 'DIRECTION', `Chosen direction: ${d.title} (for ${d.whoItServes}). Why it fits: ${d.whyYou}. Suggested first step: ${d.firstTest}`);
+  await h.start();
+}
+
 function pickDirection(text: string, s: BusinessState): number | null {
   if (!s.directions?.length) return null;
   const t = text.toLowerCase().trim();
-  const letter = t.match(/^(?:start with |go with |let'?s do |option |pick )?\(?([abc])\)?\b/) || t.match(/\b(?:option|direction)\s+([abc1-3])\b/);
+  const letter = t.match(/^(?:start with |go with |let'?s do |let'?s try |try |option |pick )?\(?([abc])\)?\s*(?:instead)?[.!]?$/) || t.match(/\b(?:option|direction)\s+([abc1-3])\b/);
   if (letter) { const c = letter[1]; return /[1-3]/.test(c) ? Number(c) - 1 : 'abc'.indexOf(c); }
   if (/^(yes|yeah|ok|okay|sure|go|let'?s go|do it|start|the recommended one|your pick)\b/.test(t)) return s.recommended ?? 0;
   const i = s.directions.findIndex((d) => t.includes(d.title.toLowerCase().slice(0, 20)));
   return i >= 0 ? i : null;
 }
 
-const directionsText = (s: BusinessState) => {
-  const d = s.directions!; const r = s.recommended ?? 0;
-  return `Okay — you don't need to know yet. Based on what you've told me, I see three directions:\n\n${d.map((x, i) => `${'ABC'[i]}) ${x.title} — for ${x.whoItServes}. First move: ${x.firstTest} (${x.firstMoveCostInr ? `about ₹${x.firstMoveCostInr.toLocaleString('en-IN')}` : 'free'}, ~${x.firstMoveDays} day${x.firstMoveDays === 1 ? '' : 's'})`).join('\n')}\n\nI'd start with ${'ABC'[r]}${s.recommendWhy ? ` — ${s.recommendWhy}` : ''}. Want me to start? Or pick another.`;
+/** Hippo's call: one recommended direction (which becomes the first Move right away) and, at most, two alternatives. */
+const recommendationText = (s: BusinessState) => {
+  const d = s.directions!; const r = s.recommended ?? 0; const rec = d[r];
+  const others = d.map((x, i) => ({ x, i })).filter(({ i }) => i !== r);
+  return `I've thought through a few directions. ${s.recommendWhy ? `I think we should start with ${rec.title.toLowerCase()} — ${s.recommendWhy.replace(/\.$/, '')}.` : `I think we should start with ${rec.title.toLowerCase()}, for ${rec.whoItServes}.`}\n\nI don't want you spending money building anything yet. First step: ${rec.firstTest.replace(/\.$/, '')}. I'm setting that up now.${others.length ? `\n\nIf it doesn't feel right, I also considered ${others.map(({ x, i }) => `${'ABC'[i]}) ${x.title.toLowerCase()}`).join(' and ')} — just say the letter.` : ''}`;
 };
 
 // ---------------------------------------------------------------- one founder message
@@ -156,6 +167,14 @@ export async function postMoveMessage(ctx: Ctx, conv: { id: string; phase: strin
     await db.conversation.update({ where: { id: conv.id }, data: { state: json(s) } });
     const actor = { userId: ctx.user.id, founderId: ctx.founder.id };
     if (isStop(text)) { const m = await currentMove(objective.id); if (m) await parkMove(m.id, actor, true); await say("Stopped. Nothing runs and nothing goes out without you. Say anything when you want to pick it up."); return; }
+    const alt = s.directions?.length && text.trim().length <= 40 && !/^(yes|yeah|ok|okay|sure|go|let'?s go|do it|start)\b/i.test(text.trim()) ? pickDirection(text, s) : null;
+    if (alt !== null && alt !== (s.chosen ?? s.recommended ?? 0) && s.directions?.[alt]) {
+      const m = await currentMove(objective.id);
+      if (m) await db.move.update({ where: { id: m.id }, data: { status: 'SUPERSEDED', closeReason: 'founder chose another direction' } });
+      await say(`OK — ${s.directions[alt].title.toLowerCase()} instead. Give me a moment — I'm working out the first move.`);
+      await startDirection(ctx, conv.id, s, alt);
+      return;
+    }
     const control = movingControl(text) as MoveControl | null;
     if (control) { await say(await applyMoveAction(actor, objective, control, { text, proof: proofIn(text) })); return; }
     const move = await currentMove(objective.id);
@@ -203,12 +222,8 @@ export async function postMoveMessage(ctx: Ctx, conv: { id: string; phase: strin
   const phase = conv.phase as Phase;
   const choice = pickDirection(text, s);
   if (choice !== null && s.directions?.[choice]) {
-    const d = s.directions[choice];
-    s.objective = { value: d.objective.slice(0, 300), provenance: 'FOUNDER' }; // chosen by the founder
-    s.noIdea = false;
-    await say(`${d.title} it is. Give me a moment — I'm working out the first move.`);
-    const h = await handoff(ctx, conv.id, s, 'DIRECTION', `Chosen direction: ${d.title} (for ${d.whoItServes}). Suggested first step: ${d.firstTest}`);
-    await h.start();
+    await say(`${s.directions[choice].title} it is. Give me a moment — I'm working out the first move.`);
+    await startDirection(ctx, conv.id, s, choice);
     return;
   }
   let raw: unknown = null;
@@ -231,7 +246,8 @@ has_business_idea: false only when the founder has no product or business in min
   if (noIdea && !ns.directions?.length) {
     ns.noIdea = true;
     const asked = ns.ideaQuestions ?? 0;
-    if (asked < 2 && !JUST_SUGGEST_RE.test(text)) {
+    const knowsTime = ns.capacity?.hoursPerWeek !== undefined;
+    if (asked < (knowsTime ? 1 : 2) && !JUST_SUGGEST_RE.test(text)) {
       ns.ideaQuestions = asked + 1;
       const reply = `${asked === 0 ? "No problem — you don't need to know yet. " : ''}${IDEA_QUESTIONS[asked]}`;
       await say(reply, { kind: 'IDEA_QUESTION' });
@@ -244,7 +260,10 @@ has_business_idea: false only when the founder has no product or business in min
       const d = await generateJson<unknown>('explore', directionsPrompt(about, { budgetInr: ns.capacity?.budgetInr, hoursPerWeek: ns.capacity?.hoursPerWeek, avoid: ns.capacity?.avoid ?? [], minor: ns.profile?.minor }), DIRECTIONS_SCHEMA, {}, usage);
       const c = normaliseDirectionChoice(d.data);
       Object.assign(ns, { directions: c.directions, recommended: c.recommended, recommendWhy: c.why });
-      await say(directionsText(ns), { kind: 'DIRECTIONS' });
+      await say(recommendationText(ns), { kind: 'DIRECTIONS' });
+      await db.conversation.update({ where: { id: conv.id }, data: { state: json(ns), phase: 'DISCOVER', status: 'ACTIVE' } });
+      await startDirection(ctx, conv.id, ns, ns.recommended ?? 0); // Hippo decides; the founder doesn't have to pick
+      return;
     } catch (e) {
       console.error(JSON.stringify({ event: 'hippo_directions_failed', error: e instanceof Error ? e.message.slice(0, 200) : String(e) }));
       await say("Tell me one thing you're good at or enjoy, and I'll suggest three directions with a cheap first step for each.");

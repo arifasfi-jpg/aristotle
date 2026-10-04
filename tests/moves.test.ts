@@ -2,7 +2,7 @@
 // never lower it), validation against constraints/preferences/history, and the deterministic conversation controls.
 import { describe, expect, it } from 'vitest';
 import {
-  consequentialReasons, emptyCapacity, fallbackMove, materialChange, mergeCapacity, mergeProfile, movingControl, normaliseMove,
+  consequentialReasons, emptyCapacity, fallbackMove, materialChange, mergeCapacity, mergeProfile, movesEnabled, movingControl, normaliseMove,
   readFounderSignals, readSignal, validateMove, type MoveContext, type ProposedMove,
 } from '../src/lib/hippo/moves';
 
@@ -17,6 +17,16 @@ const ctx = (o: Partial<MoveContext> = {}): MoveContext => ({
   beliefs: [], history: [], signals: [], reason: 'START', blockedRoutes: [], ...o,
 });
 
+describe('where Moves are on', () => {
+  it('on in Preview by default; HIPPO_MOVES=off restores the previous experience; Production only when explicitly on', () => {
+    expect(movesEnabled({ VERCEL_ENV: 'preview' })).toBe(true);
+    expect(movesEnabled({ VERCEL_ENV: 'preview', HIPPO_MOVES: 'off' })).toBe(false);
+    expect(movesEnabled({ VERCEL_ENV: 'production' })).toBe(false);
+    expect(movesEnabled({})).toBe(false);
+    expect(movesEnabled({ HIPPO_MOVES: 'on' })).toBe(true);
+  });
+});
+
 describe('reading the founder (no questionnaire)', () => {
   it('age → minor; casual style; guardian', () => {
     expect(readFounderSignals('I am 10 years old bro. I want to start a business of quiz books for kids.').profile).toMatchObject({ age: 10, minor: true, casual: true });
@@ -27,6 +37,7 @@ describe('reading the founder (no questionnaire)', () => {
   it('money, customers, access and what they will not do', () => {
     expect(readFounderSignals('I only have ₹2,000.').capacity.budgetInr).toBe(2000);
     expect(readFounderSignals('I can put in ₹10,000 and 10 hours a week').capacity).toMatchObject({ budgetInr: 10000, hoursPerWeek: 10 });
+    expect(readFounderSignals('I have 2–3 hours a day').capacity.hoursPerWeek).toBe(14);
     expect(readFounderSignals("I can't do this — I don't want to give it to friends").capacity.avoid).toEqual(['give it to friends']);
     expect(readFounderSignals("I can't do this.").capacity.avoid).toBeUndefined();
     expect(readFounderSignals('my budget is ₹1.5 lakh').capacity.budgetInr).toBe(150000);

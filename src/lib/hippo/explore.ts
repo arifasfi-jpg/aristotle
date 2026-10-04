@@ -1,4 +1,5 @@
 // "I don't have a business idea yet." Hippoturtle proposes directions to TEST — hypotheses, never facts.
+import { PATHWAY_LENSES } from './types';
 export const EXPLORE_SCHEMA = {
   type: 'object',
   properties: { directions: { type: 'array', items: { type: 'object', properties: {
@@ -42,13 +43,17 @@ export const DIRECTIONS_SCHEMA = {
 export type DirectionChoice = Direction & { firstMoveCostInr: number; firstMoveDays: number };
 
 export function directionsPrompt(about: string, constraints: { budgetInr?: number; hoursPerWeek?: number; avoid: string[]; minor?: boolean }): string {
-  return `You are Hippo. A person wants to start something but doesn't know what yet. Based ONLY on what they told you, suggest exactly
-3 different business directions that fit THEM, and recommend one. These are directions to test, not facts.
-Rules: no market sizes, statistics or prices you can't justify. whyYou links to their skills, situation or access.
+  return `You are Hippo. A person wants to start something but doesn't know what yet. Your job is NOT to find the theoretically best
+business — it is to find the best FIRST REAL-WORLD TEST for THIS person. Based ONLY on what they told you:
+1. Privately consider many possibilities, using these angles (internal only — never name them): ${PATHWAY_LENSES.map((l) => l.toLowerCase().replace(/_/g, ' ')).join(', ')}.
+2. Keep only 1 to 3 genuinely different directions (do not pad to three) and recommend ONE.
+Recommend by: fit with their skills, time and money; how fast a real person can respond; how cheaply it can be tested; whether they can
+reach those customers; what they said they will or won't do. Prefer a direction they can start this week without spending money.
+These are directions to test, not facts. No market sizes, statistics, scores or prices you can't justify. whyYou links to their skills, situation or access.
 firstTest: the first real-world step, doable in ≤ 7 days${constraints.budgetInr !== undefined ? ` and costing at most ₹${Math.min(constraints.budgetInr, 2000)}` : ' for under ₹2,000'}.
 firstMoveCostInr: its cost in rupees (0 if free). firstMoveDays: days to a first response from a real person.
 ${constraints.avoid.length ? `Never suggest anything they said they won't do: ${constraints.avoid.join('; ')}.\n` : ''}${constraints.minor ? 'They are under 18: directions must be safe and need a parent for money or strangers.\n' : ''}objective: one sentence written as the founder ("I want to …").
-recommended: 0, 1 or 2 — the one you would start with. why: one plain sentence why.
+recommended: the index of the one you would start with. why: one plain sentence a friend would say, e.g. "you can start without spending money, it fits your evenings, and we'll know within days whether people want it".
 ABOUT THEM: """${about.slice(0, 3000)}"""
 JSON only.`;
 }

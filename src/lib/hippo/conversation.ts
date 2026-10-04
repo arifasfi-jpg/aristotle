@@ -34,7 +34,7 @@ export type BusinessState = {
   noIdea?: boolean;                                // "I don't know what to do" — Hippo helps choose before any Move
   ideaQuestions?: number;                          // questions asked while choosing (at most 2)
   directions?: DirectionChoice[];                  // the three directions offered
-  recommended?: number; recommendWhy?: string;
+  recommended?: number; recommendWhy?: string; chosen?: number;
   signals?: { summary: string; polarity: string; source: string; at: string; moveId: string }[];
 };
 export const emptyState = (): BusinessState => ({ objective: null, target: null, current_state: null, constraints: [], known_facts: [], unknowns: [], founder_preferences: [], conversation_summary: '', probes: 0, previous_objectives: [] });

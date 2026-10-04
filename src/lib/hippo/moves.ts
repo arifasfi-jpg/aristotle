@@ -9,7 +9,9 @@
 // Pure functions only (no database, no model calls): everything here is unit-testable.
 import { MARKETING_CLAIM_RULES } from './claims';
 
-export const movesEnabled = (env: Record<string, string | undefined> = process.env) => env.HIPPO_MOVES === 'on';
+// On when HIPPO_MOVES=on; on by default in Vercel Preview (HIPPO_MOVES=off restores the previous experience). Production
+// only with an explicit HIPPO_MOVES=on.
+export const movesEnabled = (env: Record<string, string | undefined> = process.env) => env.HIPPO_MOVES === 'on' || (env.HIPPO_MOVES !== 'off' && env.VERCEL_ENV === 'preview');
 
 export const MOVE_KINDS = ['RESEARCH', 'BUILD', 'SELL', 'TALK', 'TEST', 'PRICE', 'BUY', 'CONTACT', 'PUBLISH', 'DECIDE', 'STOP', 'PIVOT', 'VALIDATE', 'EXECUTE'] as const;
 export type MoveKind = (typeof MOVE_KINDS)[number];
@@ -61,7 +63,7 @@ export function readFounderSignals(text: string): { profile: FounderProfile; cap
     || t.match(/\b(?:only have|have only|i have|budget(?: is| of)?|can spend|can invest)\s*(?:of |around |about |just )?(\d[\d,]*(?:\.\d+)?)\s*(k|thousand|lakh|lac)?\s*(?:rupees|rs|inr)\b/)
     || t.match(/(?:₹|rs\.?\s?)(\d[\d,]*(?:\.\d+)?)\s*(k|thousand|lakh|lac)?\s*(?:budget|to spend|to invest)\b/);
   if (budget) capacity.budgetInr = amount(budget[1], budget[2]);
-  const hours = t.match(/\b(\d{1,3})\s*(?:hours?|hrs?)\s*(?:a|per|every)\s*(week|day)\b/);
+  const hours = t.match(/\b(\d{1,3})(?:\s*(?:-|–|to)\s*\d{1,3})?\s*(?:hours?|hrs?)\s*(?:a|per|every)\s*(week|day)\b/); // a range counts its low end
   if (hours) capacity.hoursPerWeek = Number(hours[1]) * (hours[2] === 'day' ? 7 : 1);
   const customers = t.match(/\b(?:already\s+)?(?:have|got|serve|with)\s+(?:about\s+|around\s+|over\s+)?(\d[\d,]*)\s+(?:existing\s+|paying\s+|regular\s+|loyal\s+)?(?:customers|clients|buyers|subscribers|users)\b/);
   if (customers) capacity.existingCustomers = amount(customers[1]);

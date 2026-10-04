@@ -15,7 +15,8 @@ describe('1 + 2. objective conversation: vague → one clarifying question; numb
     expect(t).toMatchObject({ handoff: false, intent: 'OBJECTIVE' });
     expect(run.phase).toBe('DISCOVER');
     expect(t.reply).toMatch(/\?/);
-    expect(run.state.objective).toEqual({ value: 'Start a clothing business', provenance: 'HIPPO' });
+    // The founder named their business: their own words are the objective (founder fact > model paraphrase).
+    expect(run.state.objective).toEqual({ value: 'I want to start a clothing business.', provenance: 'FOUNDER' });
     expect(run.state.probes).toBe(1);
   });
   it('the glucometer founder: current volume and target become founder facts; Hippo proposes when ready; approval hands off', () => {
@@ -104,9 +105,9 @@ describe('5. changing the objective updates it instead of forcing the old path',
     r = say(r, 'Young professionals', T({ reply: 'Online or retail?' })).run;
     expect(r.state.probes).toBe(2);
     const x = say(r, 'Actually forget clothing. I want to sell glucometers.', T({ intent: 'CHANGE_OBJECTIVE', objective: 'Sell glucometers', reply: 'Switching gears. Selling already, or starting from zero?' }));
-    expect(x.run.state.objective).toEqual({ value: 'Sell glucometers', provenance: 'HIPPO' });
+    expect(x.run.state.objective).toEqual({ value: 'Actually forget clothing. I want to sell glucometers.', provenance: 'FOUNDER' });
     expect(x.run.state.previous_objectives).toHaveLength(1);
-    expect(x.run.state.previous_objectives[0].objective).toBe('Start a clothing business');
+    expect(x.run.state.previous_objectives[0].objective).toBe('I want to start a clothing business. I have ₹2 lakh saved.');
     expect(x.run.state.probes).toBe(1); // a fresh objective gets fresh questions
     expect(x.run.phase).toBe('DISCOVER');
   });

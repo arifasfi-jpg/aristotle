@@ -6,6 +6,7 @@ import type { Prisma } from '@prisma/client';
 import { db } from '../db';
 import { applyTurn, handoffText, isStop, parseModelTurn, turnPrompt, TURN_SCHEMA, type BusinessState, type Phase, type Status } from './conversation';
 import { DIRECTIONS_SCHEMA, directionsPrompt, normaliseDirectionChoice } from './explore';
+import { clarifyQuestion, statesBusiness, vagueDomain } from './founder-objective';
 import { aiMeta, generateJson } from './gateway';
 import { HttpError } from './context';
 import { createObjective } from './service';
@@ -273,10 +274,20 @@ has_business_idea: false only when the founder has no product or business in min
   const ns: BusinessState = { ...r.state, profile: s.profile, capacity: s.capacity, signals: s.signals, evidenceOpen: s.evidenceOpen, noIdea: s.noIdea, ideaQuestions: s.ideaQuestions, directions: s.directions, recommended: s.recommended, recommendWhy: s.recommendWhy };
   if (r.intent === 'STOP') { await say(r.reply); await db.conversation.update({ where: { id: conv.id }, data: { state: json(ns), status: 'PAUSED', phase: 'DISCOVER' } }); return; }
 
+  // A sector without who or what ("something in lending"): ask once — never pick a segment for them.
+  const domain = vagueDomain(text);
+  if (domain && !ns.clarified && !(ns.objective?.provenance === 'FOUNDER' && statesBusiness(ns.objective.value))) {
+    ns.clarified = true;
+    await say(clarifyQuestion(domain), { kind: 'CLARIFY' });
+    await db.conversation.update({ where: { id: conv.id }, data: { state: json(ns), phase: 'DISCOVER', status: 'ACTIVE' } });
+    return;
+  }
   // "I don't know": at most two questions, then three directions with one recommended — never a questionnaire.
+  // Never when the founder has already named their business: Hippo doesn't choose a different one for them.
+  const founderBusiness = ns.objective?.provenance === 'FOUNDER' && statesBusiness(ns.objective.value);
   const hasIdea = (raw as { has_business_idea?: unknown } | null)?.has_business_idea;
   const noIdea = ns.noIdea || hasIdea === false || (!ai && NO_IDEA_RE.test(text) && !ns.objective?.value.match(/\b(sell|make|build|open|start|run)\b.*\b(shop|store|book|app|service|business of)\b/i)) || r.intent === 'DONT_KNOW';
-  if (noIdea && !ns.directions?.length) {
+  if (noIdea && !founderBusiness && !ns.directions?.length) {
     ns.noIdea = true;
     const asked = ns.ideaQuestions ?? 0;
     const knowsTime = ns.capacity?.hoursPerWeek !== undefined;

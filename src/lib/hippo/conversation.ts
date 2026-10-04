@@ -8,6 +8,7 @@
 import { extractFounderFacts, type FounderFact } from '../founder-facts';
 import type { DirectionChoice } from './explore';
 import type { Capacity, FounderProfile } from './moves';
+import { FOUNDER_OBJECTIVE_RULES, statesBusiness } from './founder-objective';
 
 export const MAX_PROBES = 3;
 export const OPENING = 'Alright bro. What are you trying to build or achieve?';
@@ -36,7 +37,8 @@ export type BusinessState = {
   directions?: DirectionChoice[];                  // the three directions offered
   recommended?: number; recommendWhy?: string; chosen?: number;
   signals?: { summary: string; polarity: string; source: string; at: string; moveId: string }[];
-  evidenceOpen?: boolean;                          // the founder just said they talked to people; their next answer adds to it
+  evidenceOpen?: boolean;
+  clarified?: boolean;                             // asked "for whom, and for what?" once                          // the founder just said they talked to people; their next answer adds to it
 };
 export const emptyState = (): BusinessState => ({ objective: null, target: null, current_state: null, constraints: [], known_facts: [], unknowns: [], founder_preferences: [], conversation_summary: '', probes: 0, previous_objectives: [] });
 
@@ -167,6 +169,8 @@ export function applyTurn(state: BusinessState, phase: Phase, status: Status, fo
   const correcting = intent === 'CORRECTION';
   if (!s.objective && !t.objective && intent !== 'DONT_KNOW') s.objective = { value: founderText.trim().slice(0, 300), provenance: 'FOUNDER' };
   s.objective = correcting && t.objective ? { value: t.objective.trim().slice(0, 300), provenance: 'FOUNDER' } : setByHippo(s.objective, t.objective) ?? s.objective;
+  // When the founder names their business, their own words are the objective — never the model's paraphrase of it.
+  if (statesBusiness(founderText) && (correcting || s.objective?.provenance !== 'FOUNDER')) s.objective = { value: founderText.trim().slice(0, 300), provenance: 'FOUNDER' };
   if (!tgt.length) s.target = correcting && t.target && !/^not /i.test(t.target) ? { value: t.target.trim().slice(0, 300), provenance: 'FOUNDER' } : setByHippo(s.target, t.target);
   if (!cur.length) s.current_state = correcting && t.current_state && !/^not /i.test(t.current_state) ? { value: t.current_state.trim().slice(0, 300), provenance: 'FOUNDER' } : setByHippo(s.current_state, t.current_state);
   s.constraints = list(s.constraints, t.constraints);
@@ -224,6 +228,8 @@ If they challenge you or ask for a different route, engage honestly in 1–3 sen
 Do not invent market data, prices or statistics. Do not promise research results.
 
 Fields: objective/target/current_state = your short reading of what the founder said ("Not stated yet" if unknown).
+${FOUNDER_OBJECTIVE_RULES}
+If the founder names only a sector ("something in lending"), ask ONE question: for whom, and for what — do not pick a segment for them.
 founder_facts: ONLY things the founder literally said in their LAST message, each with "quote" copied word-for-word from it.
 unknowns: what still needs to be found out. conversation_summary: 1–2 sentences of the whole conversation so far.
 Phase: ${phase}.

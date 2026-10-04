@@ -43,6 +43,8 @@ const TAILOR_TALK = mv({ kind: 'TALK', title: 'Ask 3 women in Mumbai about their
 const TAILOR_REDISCOVER = mv({ kind: 'TALK', title: 'Interview 5 more women about what they want from a tailor', why: 'Understand them better.', bet: 'More detail helps', hippoWill: 'Write interview questions', needs: ['Interview 5 women'], expectedSignal: 'Their needs', artifactBrief: 'Interview guide', routeKey: 'more women interviews' });
 const TAILOR_APP = mv({ kind: 'BUILD', title: 'Build the tailoring marketplace app', why: 'Women need it.', bet: 'They will use the app', hippoWill: 'Write the app spec', needs: ['Hire a developer'], expectedSignal: 'Downloads', artifactBrief: 'App spec', routeKey: 'build marketplace app' });
 const TAILOR_CONCIERGE = mv({ kind: 'TEST', title: 'Get 3 women their clothes stitched by a woman tailor who comes home', why: 'They said: no time to visit, uncomfortable with male tailors, travel costs — test if we can deliver exactly that, by hand.', bet: 'Women will book and pay for a woman tailor who comes to them', hippoWill: 'Write the offer with a trial price, a simple home-measurement checklist, and a pickup/delivery plan; list where to find women tailors nearby', needs: ['Find 1 woman tailor nearby', 'Offer it to the 3 women at the trial price'], expectedSignal: 'How many book and pay, and what goes wrong with measurements, fitting and pickup', artifactBrief: 'Offer, measurement checklist, pickup plan', routeKey: 'concierge women tailor home visit' });
+const SALARY = mv({ kind: 'TALK', title: 'Ask 10 blue-collar workers in a manufacturing cluster about salary advances', why: 'Faster to test.', bet: 'Workers want advances', hippoWill: 'Write the questions', needs: ['Visit a cluster'], expectedSignal: 'Interest', artifactBrief: 'Questions', routeKey: 'salary advance workers' });
+const MSME_MOVE = { ...mv({ kind: 'TEST', title: 'Ask 5 kirana and wholesale shop owners if they would buy stock on 30-day credit', why: 'Your MSME BNPL lives or dies on whether small businesses want to defer paying for stock.', bet: 'Shop owners will say yes to 30-day credit on stock', hippoWill: 'Write a 3-line offer and 4 questions about what they buy, how often, and what credit they get today', needs: ['Show it to 5 shop owners in Mumbai'], expectedSignal: 'How many say yes, and what they buy on credit today', artifactBrief: 'Offer and questions', routeKey: 'msme stock credit check' }), alternative: { title: 'Salary advances for factory workers', why: 'a different, possibly faster market — only if you want it' } };
 const LUNCH = mv({ kind: 'SELL', owner: 'HIPPO', title: 'Pre-order page for home-cooked lunch boxes near offices', why: 'Office workers nearby want home food; test before cooking.', bet: 'Office workers will pre-order', hippoWill: 'Make and host the page', needs: ['Share the link with 2 office groups'], expectedSignal: 'Pre-order requests in 3 days', artifactType: 'PUBLIC_PAGE', artifactBrief: 'Lunch box pre-order page', routeKey: 'lunchbox preorder page' });
 
 function model(prompt: string): unknown {
@@ -51,6 +53,7 @@ function model(prompt: string): unknown {
   if (prompt.startsWith('MOVE ENGINE')) {
     prompts.push({ kind: 'move', text: prompt });
     const retry = prompt.includes('YOUR PREVIOUS PROPOSAL WAS REJECTED');
+    if (/objective: [^\n]*msme/i.test(prompt)) return retry ? MSME_MOVE : SALARY; // the model tries to substitute the business
     if (/objective: .*tailor/i.test(prompt)) {
       if (!prompt.includes('\n- founder reported:')) return TAILOR_TALK;
       return retry ? TAILOR_CONCIERGE : TAILOR_REDISCOVER; // the first try steps backwards (more interviews)
@@ -115,6 +118,10 @@ function model(prompt: string): unknown {
   if (prompt.startsWith('You are Hippo —')) {
     prompts.push({ kind: 'turn', text: prompt });
     if (last.startsWith('I am 10 years old')) return { intent: 'OBJECTIVE', reply: 'Love it.', ready_to_propose: true, objective: 'Quiz books for kids, written by a kid', target: '5,000 books through ecommerce', current_state: 'Just an idea', has_business_idea: true };
+    // A model that rewrites the founder's business into an adjacent one (the live MSME BNPL bug).
+    if (/msme buynow paylater/i.test(last)) return { intent: 'OBJECTIVE', reply: 'An MSME buy-now-pay-later business, nice. Mumbai first?', ready_to_propose: false, has_business_idea: false, objective: 'Hyper-local salary advance brokerage for blue-collar workers in Mumbai' };
+    if (/^Yes Mumbai 1st/.test(last)) return { intent: 'ANSWER', reply: 'Got it.', ready_to_propose: true, has_business_idea: false, objective: 'Salary advance brokerage for blue-collar workers' };
+    if (/something in lending/.test(last)) return { intent: 'DONT_KNOW', reply: 'Lending is broad.', ready_to_propose: false, has_business_idea: false, objective: 'Salary advance brokerage for blue-collar workers' };
     if (/ladies tailor/.test(last)) return { intent: 'OBJECTIVE', reply: 'Love it. Have you talked to any women about it?', ready_to_propose: false, has_business_idea: true, objective: 'Ladies tailor service in Mumbai' };
     if (last === TAILOR) return { intent: 'OBJECTIVE', reply: 'A women-for-women tailoring service — love it.', ready_to_propose: true, objective: 'Women-focused tailoring marketplace in Mumbai', has_business_idea: true };
     if (/they say they need it/.test(last)) return { intent: 'ANSWER', reply: 'You actually talked to them? What specifically did they say?', ready_to_propose: false, has_business_idea: true, objective: 'Women-focused tailoring marketplace in Mumbai' };
@@ -497,6 +504,37 @@ describe.skipIf(!E2E)('V1 Moves (real Postgres)', () => {
     v = await say("What's next?");
     expect(lastHippo(v)).toMatch(/the next thing we should do is: Offer the cafe that asked about price a ₹499 first month\./);
     expect(await db.move.count({ where: { title: CAFE_MORE.move.title } })).toBe(0);
+  }, 60_000);
+
+  it('REGRESSION: "MSME BNPL" stays MSME BNPL — no "I don\'t know" questions, no salary advances; an alternative is offered, never substituted', async () => {
+    const { db, say } = await mods();
+    jar = new Map();
+    await say('I want to build a msme buynow paylater busienss');
+    let v = await say('Yes Mumbai 1st and India later');
+    expect(v.state.objective).toEqual({ value: 'I want to build a msme buynow paylater busienss', provenance: 'FOUNDER' });
+    expect(v.messages.filter((m: Row) => ['IDEA_QUESTION', 'DIRECTIONS'].includes(m.kind))).toEqual([]);
+    expect(JSON.stringify(v.messages)).not.toMatch(/salary|blue-collar/i);
+    const move = await db.move.findUnique({ where: { id: v.move.id } });
+    expect((await db.objective.findUnique({ where: { id: move.objectiveId } })).text).toMatch(/msme buynow paylater/);
+    const engine = prompts.filter((p) => p.kind === 'move').slice(-2).map((p) => p.text);
+    expect(engine[0]).toMatch(/objective: I want to build a msme buynow paylater busienss/);
+    expect(engine[1]).toMatch(/YOUR PREVIOUS PROPOSAL WAS REJECTED[\s\S]*OFF_OBJECTIVE: the founder's business serves small businesses, but this targets employees/);
+    expect(v.move.title).toBe(MSME_MOVE.move.title);
+    expect(v.move.alternative).toEqual({ title: 'Salary advances for factory workers', why: 'a different, possibly faster market — only if you want it' });
+    expect(await db.move.count({ where: { title: { contains: 'salary' } } })).toBe(0);
+    // Business continues on the founder's objective after the Move cycle.
+    v = await say('ok');
+    expect(v.state.objective.value).toBe('I want to build a msme buynow paylater busienss');
+  }, 60_000);
+
+  it('"something in lending" gets one clarifying question — Hippo does not pick a segment', async () => {
+    const { say } = await mods();
+    jar = new Map();
+    const v = await say('I want to do something in lending');
+    expect(lastHippo(v)).toMatch(/^Lending for whom, and for what\?/);
+    expect(v.move).toBeNull();
+    expect(v.state.directions ?? []).toEqual([]);
+    expect(JSON.stringify(v.messages)).not.toMatch(/salary|blue-collar/i);
   }, 60_000);
 
   it('UI + public surface: one pinned Move card, plain words, the native page (draft hidden, views and self-tests not counted) and the Ledger', async () => {

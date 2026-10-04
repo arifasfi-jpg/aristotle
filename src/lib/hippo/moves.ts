@@ -8,6 +8,7 @@
 //
 // Pure functions only (no database, no model calls): everything here is unit-testable.
 import { MARKETING_CLAIM_RULES } from './claims';
+import { FOUNDER_OBJECTIVE_RULES, offObjective } from './founder-objective';
 
 // On when HIPPO_MOVES=on; on by default in Vercel Preview (HIPPO_MOVES=off restores the previous experience). Production
 // only with an explicit HIPPO_MOVES=on.
@@ -246,6 +247,9 @@ export function validateMove(m: ProposedMove, ctx: MoveContext): { ok: boolean; 
   if (m.artifactType === 'PUBLIC_PAGE' && m.owner !== 'HIPPO') problems.push('WRONG_OWNER: Hippo hosts public pages itself (owner HIPPO).');
   if (m.kind === 'RESEARCH' && !m.researchJustification) problems.push('RESEARCH_NOT_JUSTIFIED: prefer a Move that reaches a real person; research only when it is clearly the highest-leverage step (say why).');
   if ((ctx.capacity.existingCustomers ?? 0) > 0 && /\b(first|initial)\s+(\d+\s+)?(customers?|buyers?|sales?|users?)\b/.test(n0(text))) problems.push(`IGNORES_KNOWN_FACT: the founder already has ${ctx.capacity.existingCustomers} customers.`);
+  // The founder's stated customer is authoritative: a Move may not quietly serve someone else (alternatives go in "alternative").
+  const off = offObjective(ctx.objective, [m.title, m.why, m.hippoWill, m.artifactBrief, ...m.needs].join(' '));
+  if (off) problems.push(`OFF_OBJECTIVE: ${off}. Stay on the founder's stated business; put a different opportunity in "alternative" and let them choose.`);
   // Learning: what the world already said changes what the next Move may be.
   const L = learningStage(ctx.signals, ctx.history);
   const said = n0([m.title, m.hippoWill, m.artifactBrief].join(' '));
@@ -360,6 +364,7 @@ RULES:
 - Respect every constraint and the money available. If the founder is under 18, a parent or guardian must be involved for anything
   with money, public pages or strangers — say so in needs.
 - needs: what Hippo needs from the founder; at most 3; each doable in minutes.
+- ${FOUNDER_OBJECTIVE_RULES}
 - Never ask the founder to choose between options (which customers, which channel, which product first): pick the sensible default
   yourself and say it ("we'll start with cafes"). The founder can always say "try another way".
 - ${FOUNDER_TRUTH_RULES}

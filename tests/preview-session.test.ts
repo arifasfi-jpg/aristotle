@@ -28,24 +28,22 @@ describe('Session cookie name', () => {
     expect(sessionCookieName({})).toBe('aristotle_session');
     expect(sessionCookieName({ ARISTOTLE_SESSION_COOKIE: 'custom', VERCEL_ENV: 'production', VERCEL_GIT_COMMIT_SHA: 'abc1234' })).toBe('custom');
   });
-  it('Preview is namespaced by the deployment commit (7 chars); without a commit it is unchanged', () => {
-    expect(sessionCookieName({ VERCEL_ENV: 'preview', VERCEL_GIT_COMMIT_SHA: '33eea91504e898' })).toBe('aristotle_session_33eea91');
+  it('Preview uses the same name across deployments (a deploy never moves a founder to an empty conversation)', () => {
+    expect(sessionCookieName({ VERCEL_ENV: 'preview', VERCEL_GIT_COMMIT_SHA: '33eea91504e898' })).toBe('aristotle_session');
     expect(sessionCookieName({ VERCEL_ENV: 'preview' })).toBe('aristotle_session');
   });
 });
 
-describe('Preview: a new deployment starts clean; the same deployment persists', () => {
-  it('REGRESSION: same deployment → same founder on refresh; new deployment → a clean founder; Production unaffected', async () => {
+describe('Preview: a new deployment keeps the founder and their business', () => {
+  it('REGRESSION (MSME BNPL live test): same browser, next deployment → same founder; Production unaffected', async () => {
     jar.clear();
     deploy('preview', '33eea91504e898');
     const first = await currentOrGuestUser();
     expect((await getCurrentUser())?.id).toBe(first.id);        // refresh / navigation
-    expect((await currentOrGuestUser()).id).toBe(first.id);     // no second user created
-    deploy('preview', 'b7c1d20aa');                              // next Preview deployment, same browser
-    expect(await getCurrentUser()).toBeNull();                   // the old EMI founder is not reused
-    const fresh = await currentOrGuestUser();
-    expect(fresh.id).not.toBe(first.id);
-    expect([...jar.keys()].sort()).toEqual(['aristotle_session_33eea91', 'aristotle_session_b7c1d20']);
+    deploy('preview', 'b7c1d20aa');                              // a new Preview deployment lands mid-conversation
+    expect((await getCurrentUser())?.id).toBe(first.id);         // still the same founder — nothing they said is lost
+    expect((await currentOrGuestUser()).id).toBe(first.id);
+    expect([...jar.keys()]).toEqual(['aristotle_session']);
     deploy('production', 'b7c1d20aa');
     expect(sessionCookieName()).toBe('aristotle_session');
   });
@@ -72,15 +70,15 @@ describe('Start a New Business: session mechanics (no database)', () => {
   it('a fresh start is a new founder; the previous session stays valid and is kept for switching back; switching swaps them', async () => {
     jar.clear(); deploy('preview', '3532728abc');
     const a = await currentOrGuestUser();
-    const tokenA = jar.get('aristotle_session_3532728')!;
+    const tokenA = jar.get('aristotle_session')!;
     const b = await startFreshSession();
     expect(b.id).not.toBe(a.id);
     expect((await getCurrentUser())!.id).toBe(b.id);
     expect((await getCurrentUser())!.id).toBe(b.id); // refresh keeps the fresh business
-    expect(JSON.parse(jar.get('aristotle_session_3532728_prev')!)).toEqual([tokenA]);
+    expect(JSON.parse(jar.get('aristotle_session_prev')!)).toEqual([tokenA]);
     expect(await switchToPreviousSession(0)).toBe(true);
     expect((await getCurrentUser())!.id).toBe(a.id);
-    expect(JSON.parse(jar.get('aristotle_session_3532728_prev')!)).toHaveLength(1);
+    expect(JSON.parse(jar.get('aristotle_session_prev')!)).toHaveLength(1);
     expect(await switchToPreviousSession(0)).toBe(true); // and back again
     expect((await getCurrentUser())!.id).toBe(b.id);
     expect(await switchToPreviousSession(4)).toBe(false); // nothing there: unchanged
@@ -89,7 +87,7 @@ describe('Start a New Business: session mechanics (no database)', () => {
   it('a tampered previous-list cookie is ignored (only well-formed tokens of real sessions are honoured)', async () => {
     jar.clear(); deploy('preview', '3532728abc');
     await currentOrGuestUser();
-    jar.set('aristotle_session_3532728_prev', JSON.stringify(['not-a-token', 'f'.repeat(64)]));
+    jar.set('aristotle_session_prev', JSON.stringify(['not-a-token', 'f'.repeat(64)]));
     expect(await switchToPreviousSession(0)).toBe(false); // 'f…f' is well-formed but no such session
   });
 });

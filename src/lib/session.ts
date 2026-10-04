@@ -9,10 +9,10 @@ const DAYS = 30;
  * so each new Preview deployment starts with a clean anonymous founder (the Preview URL and database outlive a
  * deployment), while refresh and navigation within one deployment keep the same session.
  */
+// One stable name everywhere. (Preview used to namespace it per deployment, so a deploy landing mid-conversation silently
+// moved the founder to an empty conversation and lost what they had said. "Start a New Business" is the way to start clean.)
 export function sessionCookieName(env: Record<string, string | undefined> = process.env): string {
-  const base = env.ARISTOTLE_SESSION_COOKIE || 'aristotle_session';
-  const sha = env.VERCEL_GIT_COMMIT_SHA?.replace(/[^a-zA-Z0-9]/g, '').slice(0, 7);
-  return env.VERCEL_ENV === 'preview' && sha ? `${base}_${sha}` : base;
+  return env.ARISTOTLE_SESSION_COOKIE || 'aristotle_session';
 }
 
 export async function createSession(userId: string) {

@@ -57,7 +57,7 @@ export function readFounderSignals(text: string): { profile: FounderProfile; cap
   if (/\bbrutal\b/.test(t)) profile.brutal = true;
   if (/\bthink bigger\b/.test(t)) profile.bigger = true;
   if (/\b(\d+)\s*\+?\s*years? (of experience|in (the )?(industry|business|trade))|\bi(?:'ve| have) (run|built|started|scaled) (a|my|two|three|\d+|several)\b/.test(t)) profile.experience = 'EXPERIENCED';
-  else if (/\b(first business|never (done|started|run)|new to (this|business)|first time)\b/.test(t)) profile.experience = 'NEW';
+  else if (/\b(first business|never (done|started|run)|new to (this|business)|first time|i know nothing|know nothing|don'?t know anything|no experience|zero experience|complete beginner|i'?m a beginner)\b/.test(t)) profile.experience = 'NEW';
 
   const budget = t.match(/\b(?:only have|have only|i have|i've got|i got|got|budget(?: is| of)?|can spend|can invest|can put in|put in|invest|can afford|afford|max(?:imum)?(?: of)?)\s*(?:of |around |about |just )?(?:₹|rs\.?\s?|inr\s?)(\d[\d,]*(?:\.\d+)?)\s*(k|thousand|lakh|lac|crore)?\b/)
     || t.match(/\b(?:only have|have only|i have|budget(?: is| of)?|can spend|can invest)\s*(?:of |around |about |just )?(\d[\d,]*(?:\.\d+)?)\s*(k|thousand|lakh|lac)?\s*(?:rupees|rs|inr)\b/)
@@ -195,7 +195,7 @@ export type MoveContext = {
   objective: string; target?: string; today?: string; constraints: string[]; knownFacts: { key: string; quote: string }[]; unknowns: string[];
   preferences: string[]; profile: FounderProfile; capacity: Capacity; beliefs: { statement: string; confidence: string; evidence: string }[];
   history: PastMove[]; signals: { summary: string; polarity: string; source: string; at: string }[];
-  reason: string; instruction?: string; blockedRoutes: string[]; research?: string; company?: string | null;
+  reason: string; reasonCode?: string; instruction?: string; blockedRoutes: string[]; research?: string; company?: string | null;
 };
 
 const STOP = new Set(['the', 'a', 'an', 'to', 'of', 'and', 'or', 'for', 'with', 'on', 'in', 'at', 'by', 'any', 'my', 'your', 'our', 'build', 'make', 'approach', 'call', 'talk', 'visit', 'go', 'sell', 'use', 'run', 'do', 'create', 'develop', 'spend', 'post', 'be', 'cold']);
@@ -225,9 +225,12 @@ export function validateMove(m: ProposedMove, ctx: MoveContext): { ok: boolean; 
   const blocked = new Set(ctx.blockedRoutes);
   for (const p of ctx.history) {
     const failed = ['FAILED', 'DECLINED'].includes(p.status) || p.negative;
-    const sameRoute = p.routeKey === m.routeKey || similar(p.title, m.title) >= 0.8;
+    // After "I can't" / "another way" / "it failed", the same activity reworded (other channel, same thing) is not a new route.
+    const code = ctx.reasonCode ?? ctx.reason;
+    const rerouting = ['CANT', 'ANOTHER_WAY', 'FAILED'].includes(code) && (blocked.has(p.routeKey) || ['FAILED', 'DECLINED'].includes(p.status));
+    const sameRoute = p.routeKey === m.routeKey || similar(p.title, m.title) >= (rerouting ? 0.6 : 0.8);
     if (sameRoute && (failed || blocked.has(p.routeKey))) problems.push(`REPEATS_FAILED_ROUTE: "${p.title}" already ${p.status === 'DECLINED' ? 'was declined by the founder' : 'did not work'}; choose a different route.`);
-    else if (sameRoute && ['DONE', 'LIVE', 'SIGNALLED'].includes(p.status) && ctx.reason !== 'HELP') problems.push(`ALREADY_DONE: "${p.title}" has already been done.`);
+    else if (sameRoute && ['DONE', 'LIVE', 'SIGNALLED'].includes(p.status) && code !== 'HELP') problems.push(`ALREADY_DONE: "${p.title}" has already been done.`);
   }
   if (blocked.has(m.routeKey) && !problems.some((p) => p.startsWith('REPEATS_FAILED_ROUTE'))) problems.push('BLOCKED_ROUTE: the founder asked for a different way than this route.');
   return { ok: problems.length === 0, problems: [...new Set(problems)], consequentialReasons: consequentialReasons(m, ctx.profile) };
@@ -252,6 +255,19 @@ export function fallbackMove(ctx: MoveContext): ProposedMove {
 // ---------------------------------------------------------------- prompts
 const STYLE = (p: FounderProfile) => p.minor ? 'very short sentences and simple words a 10-year-old understands; warm, never childish'
   : p.density === 'LIGHT' ? 'very short and plain' : p.density === 'DENSE' || p.experience === 'EXPERIENCED' ? 'dense and specific; numbers welcome' : 'short and plain';
+
+/** The founder never claims what they haven't told us. Used by the Move engine, the artifact writer and the output check. */
+export const FOUNDER_TRUTH_RULES = `SPEAKING AS THE FOUNDER (strict): anything written for the founder to send or say must be true of them. Never make them claim
+experience, customers, clients, credentials, results, expertise, a team, or that they run or own a business/agency/service unless they
+said so. If they are new to this, write it honest and low-ego: offer something specific and useful, no pitch, and ask permission
+(e.g. "I noticed a couple of simple things that might help bring in more weekend customers — I put together a one-page idea sheet. Want me to send it?").`;
+const CLAIM_RE = /[^.!?\n]*\b(?:(?:i|we) (?:run|own|have|manage) (?:a|an|my|our)\b[^.!?\n]{0,40}\b(?:agency|business|company|studio|firm|service|team)|our (?:clients|customers|team|agency|company)|years of experience|(?:i|we)(?:'ve| have) helped|i'?m an? (?:expert|specialist|professional|consultant)|i speciali[sz]e)\b[^.!?\n]*[.!?]?/gi;
+/** Sentences that make the founder claim credentials they never stated (empty when the founder said they are experienced). */
+export function inventedClaims(text: string, profile: FounderProfile, capacity?: Capacity): string[] {
+  if (profile.experience === 'EXPERIENCED' || (capacity?.existingCustomers ?? 0) > 0) return [];
+  return [...text.matchAll(CLAIM_RE)].map((m) => m[0].trim()).filter(Boolean);
+}
+export const stripClaims = (text: string, claims: string[]) => claims.reduce((t, c) => t.split(c).join(''), text).replace(/[ \t]{2,}/g, ' ');
 
 export function movePrompt(ctx: MoveContext, problems: string[] = []): string {
   const p = ctx.profile; const c = ctx.capacity;
@@ -298,6 +314,9 @@ RULES:
 - Respect every constraint and the money available. If the founder is under 18, a parent or guardian must be involved for anything
   with money, public pages or strangers — say so in needs.
 - needs: what Hippo needs from the founder; at most 3; each doable in minutes.
+- Never ask the founder to choose between options (which customers, which channel, which product first): pick the sensible default
+  yourself and say it ("we'll start with cafes"). The founder can always say "try another way".
+- ${FOUNDER_TRUTH_RULES}
 - expectedSignal: the concrete response from the world we are watching for. bet: the hypothesis this tests.
 - routeKey: 2–5 word label of the approach. title: plain words, max 12 words. why: one sentence.
 - beliefs: up to 5 working beliefs, updated from what happened; evidence = what supports it; disprovedIf = what would show it wrong.
@@ -319,7 +338,7 @@ export const PREPARE_SCHEMA = {
 };
 export type Prepared = { title: string; markdown: string; page: { headline: string; subhead: string; body: string; cta: string; priceInr: number | null } | null };
 
-export function preparePrompt(move: { title: string; why: string; hippoWill: string; artifactType: string; artifactBrief: string; needs: string[]; expectedSignal: string }, ctx: Pick<MoveContext, 'objective' | 'knownFacts' | 'profile' | 'company'>): string {
+export function preparePrompt(move: { title: string; why: string; hippoWill: string; artifactType: string; artifactBrief: string; needs: string[]; expectedSignal: string }, ctx: Pick<MoveContext, 'objective' | 'knownFacts' | 'profile' | 'company'>, problems: string[] = []): string {
   const page = move.artifactType === 'PUBLIC_PAGE';
   return `PREPARE ARTIFACT — Hippoturtle. Produce the COMPLETE thing for this Move, ready to use as-is (not an outline, not advice).
 Business: ${ctx.objective}${ctx.company ? ` (${ctx.company})` : ''}
@@ -334,6 +353,8 @@ max 150 words: what it is, who it's for, what happens next), cta (e.g. "Tell me 
 priceInr only if the founder stated a price. The page collects a name and email/phone; say "No payment is taken." Also put a short
 summary in markdown.` : 'Put the full artifact in markdown. Include exactly what the founder hands over and, where useful, a simple table to note responses.'}
 ${MARKETING_CLAIM_RULES}
+${FOUNDER_TRUTH_RULES}
+${ctx.profile.experience === 'NEW' ? 'This founder is NEW to this and said so: nothing they send may sound like an established business.\n' : ''}${problems.length ? `YOUR PREVIOUS VERSION WAS REJECTED — it made the founder claim things they never said:\n${problems.map((p) => `- "${p}"`).join('\n')}\nRewrite without them.\n` : ''}Never leave a choice for the founder to make: if a target is needed (which customers first), pick it and say so.
 JSON only.`;
 }
 
@@ -355,7 +376,7 @@ export type MoveControl = 'YES' | 'NOT_NOW' | 'HELP' | 'ANOTHER_WAY' | 'CANT' | 
 /** Deterministic controls (quick replies and their natural-language equivalents). No model call needed. */
 export function movingControl(text: string): MoveControl | null {
   const t = n0(text).replace(/[.!]+$/, '');
-  if (/^(yes|yeah|yep|ok|okay|sure|go|go ahead|do it|let'?s do it|let'?s go|approve|approved|publish( it)?|yes,? (publish|do) it|haan|chalo)$/.test(t)) return 'YES';
+  if (/^(yes|yeah|yep|ok|okay|sure|fine|alright|all right|sounds good|go|go ahead|do it|let'?s do it|let'?s go|approve|approved|publish( it)?|yes,? (publish|do) it|haan|chalo|theek hai)$/.test(t)) return 'YES';
   if (/^(not now|later|park it|maybe later|not today)\b/.test(t)) return 'NOT_NOW';
   if (/^(bring it back|resume|let'?s continue|continue)\b/.test(t)) return 'RESUME';
   if (/^(help me( do (this|it))?|how do i do (this|it)|i don'?t know how( to do (this|it))?)\b/.test(t)) return 'HELP';
@@ -384,7 +405,8 @@ export function readSignal(text: string): ReadSignal | null {
   if (/\b(paid|received|got paid|bought|purchased|ordered|pre-?ordered)\b/.test(t) && !/\b(no one|nobody|none|didn'?t|did not)\b/.test(t)) {
     return { summary, polarity: 'POSITIVE', rung: 5, ...(proof ? { proof } : {}), ...(money ? { moneyInr: Number(money[1].replace(/,/g, '')) } : {}) };
   }
-  if (/\b(no one|nobody|none|zero|0)\b[^.]{0,30}\b(replied|responded|bought|paid|came|interested|liked|signed up|clicked)\b|\b(hated|didn'?t like|did not like|said no|rejected|not interested|ignored)\b/.test(t)) return { summary, polarity: 'NEGATIVE', rung: 4, ...(proof ? { proof } : {}) };
+  if (/\b(no one|nobody|none|zero|0)\b[^.]{0,30}\b(replied|responded|bought|paid|came|interested|liked|signed up|clicked)\b|\b(hated|didn'?t like|did not like|said no|rejected|not interested|ignored|blocked)\b/.test(t) && !/\b(replied|responded|interested|asked)\b[^.]*\b(and|but)\b/.test(t)) return { summary, polarity: 'NEGATIVE', rung: 4, ...(proof ? { proof } : {}) };
+  if (/\b(asked|asking) (for|about) (the )?(price|pricing|cost|rates?|details|more)\b|\bhow much\b/.test(t)) return { summary, polarity: 'POSITIVE', rung: 4, ...(proof ? { proof } : {}) };
   if (/\b(quoted|quote|price was|asked for)\b/.test(t)) return { summary, polarity: 'NEUTRAL', rung: 4, ...(proof ? { proof } : {}) };
   if (/\b(replied|responded|loved|liked|said yes|signed up|interested|finished|asked for more|want(s|ed)? (it|more|one)|enjoyed|clicked|booked)\b/.test(t)) return { summary, polarity: 'POSITIVE', rung: 4, ...(proof ? { proof } : {}) };
   return null;

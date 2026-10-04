@@ -30,6 +30,12 @@ const LIBRARY = mv({ kind: 'TEST', title: 'Ask your school librarian to try the 
 const PRINT_RUN = mv({ kind: 'BUILD', title: 'Print 50 copies at a local shop', why: 'Have stock to sell', bet: 'People will buy printed copies', hippoWill: 'Find a printer and prepare the files', needs: ['Pay the printer'], costInr: 2000, costBasis: 'estimate: local print shop', expectedSignal: 'Copies in hand', artifactBrief: 'Print-ready file', routeKey: 'print fifty copies' });
 const CLASS = mv({ kind: 'SELL', title: 'Offer one Sunday cooking class to 5 people you know', why: 'See if people will pay to learn from you before renting anything.', bet: 'Friends will book a class', hippoWill: 'Write the invite and a simple menu', needs: ['Send the invite to 10 people'], expectedSignal: 'How many say yes', artifactBrief: 'Class invite', routeKey: 'sunday class invite' });
 const TIFFIN = mv({ kind: 'SELL', owner: 'HIPPO', title: 'Pre-order page for home tiffins in your society', why: 'Neighbours are the fastest people to reach from home.', bet: 'Neighbours will pre-order a week of tiffins', hippoWill: 'Make the page and the WhatsApp message', needs: ['Post the message in your society group'], expectedSignal: 'Pre-orders in 3 days', artifactType: 'PUBLIC_PAGE', artifactBrief: 'Tiffin pre-order page', routeKey: 'society tiffin preorder' });
+const CAFE = mv({ kind: 'SELL', title: 'Send 5 local cafes a free one-page Instagram idea sheet', why: 'Find out if cafe owners want help before you build any service.', bet: 'Some cafe owners will reply and ask for more', hippoWill: 'Pick 5 cafes near you, look at their Instagram and write each a short honest message plus a one-page idea sheet', needs: ['Send the 5 messages from your Instagram'], expectedSignal: 'Replies, questions about price, or a no', artifactBrief: 'Messages and idea sheet for 5 cafes', routeKey: 'cafe instagram dms' });
+const CAFE_REWORDED = mv({ ...CAFE.move, title: 'Send 5 local cafes a free Instagram idea sheet on WhatsApp', routeKey: 'cafe whatsapp messages' });
+const CAFE_ALT = mv({ kind: 'TEST', title: 'Ask 3 shop owners you already know what is hard about Instagram', why: 'Talking to people you know is easier than messaging strangers.', bet: 'Owners will name a problem they would pay to fix', hippoWill: 'Write the 3 questions to ask and a note sheet', needs: ['Ask 3 people you already know'], expectedSignal: 'The problems they name', artifactBrief: 'Questions and note sheet', routeKey: 'ask known owners' });
+const CAFE_HELP = mv({ ...CAFE.move, title: 'Five ready-to-send cafe messages — you only press send', hippoWill: 'Chose the 5 cafes, wrote each message with their name and one specific idea, and the reply to send if they answer', needs: ['Check the 5 messages and press send'], routeKey: 'cafe instagram dms' });
+const CAFE_PRICE = mv({ kind: 'SELL', title: 'Offer the cafe that asked about price a ₹499 first month', why: 'One person is already asking about price — test whether they will pay.', bet: 'The cafe will say yes to a small paid trial', hippoWill: 'Write the reply with what they get for ₹499', needs: ['Send the reply'], expectedSignal: 'A yes, a counter-offer or a no', artifactBrief: 'Price reply', routeKey: 'cafe paid trial offer' });
+const CAFE_FOLLOWUP = mv({ kind: 'TEST', title: 'Walk into 2 cafes and show the idea sheet in person', why: 'Messages were ignored; in person is harder to ignore.', bet: 'Owners respond better face to face', hippoWill: 'Print-ready idea sheet and what to say', needs: ['Visit 2 cafes'], expectedSignal: 'Whether they take it and what they say', artifactBrief: 'In-person idea sheet', routeKey: 'cafe in person visit' });
 const LUNCH = mv({ kind: 'SELL', owner: 'HIPPO', title: 'Pre-order page for home-cooked lunch boxes near offices', why: 'Office workers nearby want home food; test before cooking.', bet: 'Office workers will pre-order', hippoWill: 'Make and host the page', needs: ['Share the link with 2 office groups'], expectedSignal: 'Pre-order requests in 3 days', artifactType: 'PUBLIC_PAGE', artifactBrief: 'Lunch box pre-order page', routeKey: 'lunchbox preorder page' });
 
 function model(prompt: string): unknown {
@@ -38,6 +44,13 @@ function model(prompt: string): unknown {
   if (prompt.startsWith('MOVE ENGINE')) {
     prompts.push({ kind: 'move', text: prompt });
     const retry = prompt.includes('YOUR PREVIOUS PROPOSAL WAS REJECTED');
+    if (prompt.includes('objective: I want to help local cafes')) {
+      const why = (prompt.match(/WHY A NEW MOVE NOW: ([^\n]*)/) || [])[1] || '';
+      if (why.includes('materially different activity')) return retry ? CAFE_ALT : CAFE_REWORDED; // first try is the same thing via WhatsApp
+      if (why.includes('do far more of it')) return CAFE_HELP;
+      if (why.startsWith('the world responded')) return /founder reported: Two cafes replied[^\n]*\n(?!- founder reported: I sent)/.test(prompt) && !prompt.includes('Nobody replied') ? CAFE_PRICE : CAFE_FOLLOWUP;
+      return CAFE;
+    }
     if (prompt.includes('Make this easier')) return mv({ ...SAMPLE.move, title: 'Tell me 3 quiz questions now — I’ll write the librarian note', routeKey: 'librarian note together', needs: ['Say 3 questions out loud to me'] });
     if (prompt.includes('money available: ₹500') && !retry) return PRINT_RUN;                         // over budget → must be rejected
     if (prompt.includes('the last Move failed') && !retry) return PAGE;                                 // repeats the failed route → rejected
@@ -50,12 +63,23 @@ function model(prompt: string): unknown {
   }
   if (prompt.startsWith('PREPARE ARTIFACT')) {
     prompts.push({ kind: 'prepare', text: prompt });
+    if (prompt.includes('cafes')) { // the model's first draft invents credentials; Hippo must not let them through
+      const fixed = prompt.includes('YOUR PREVIOUS VERSION WAS REJECTED');
+      const stubborn = prompt.includes('Five ready-to-send');
+      return { title: 'Messages for 5 cafes', markdown: fixed && !stubborn
+        ? '## Message\nHey [Name], I noticed a couple of simple things on your Instagram that might help bring in more weekend customers. I put together a quick one-page breakdown with two ideas. No pitch or strings attached. Want me to send it?'
+        : '## Message\nHi [Name]! I run a digital marketing service and we have helped cafes grow. I noticed two simple things on your Instagram. Want me to send a one-page breakdown?' };
+    }
     return prompt.includes('PUBLIC PAGE')
       ? { title: 'Pre-order page', markdown: 'Page summary', page: { headline: prompt.includes('lunch') ? 'Home-cooked lunch boxes, delivered' : 'Animal Quiz Book by Aaira (age 10)', subhead: 'Fun quizzes written by a kid, for kids', body: 'Ten animal quizzes. Leave your contact and you will hear when it is ready.', cta: 'Tell me when it’s ready' } }
       : { title: 'Animal Quiz — sample', markdown: '# Animal Quiz (sample)\n\n1. Which animal sleeps standing up?\n\n| Friend | Finished? | Favourite round |\n|---|---|---|' };
   }
   if (prompt.includes("doesn't know what yet")) {
     prompts.push({ kind: 'directions', text: prompt });
+    if (/Instagram/.test(prompt)) return { directions: [
+      { title: 'Instagram help for local cafes', whoItServes: 'cafe owners near you', whyYou: "You're on Instagram every day", firstTest: 'Message 5 cafes with a free idea sheet', objective: 'I want to help local cafes get more customers through Instagram', firstMoveCostInr: 0, firstMoveDays: 3 },
+      { title: 'Reels editing for small gyms', whoItServes: 'gym owners', whyYou: 'You know Instagram', firstTest: 'Offer 3 gyms a free reel', objective: 'I want to edit reels for small gyms', firstMoveCostInr: 0, firstMoveDays: 5 },
+    ], recommended: 0, why: "you can start today for free, it uses what you already know, and cafe owners will tell us within days if they want it" };
     if (/from home|online/.test(prompt)) return { directions: [ // only two genuinely good options — not padded to three
       { title: 'Tiffin service for your society', whoItServes: 'working families nearby', whyYou: 'You can cook at home in your free hours', firstTest: 'A pre-order page shared in your society group', objective: 'I want to run a home tiffin service for my society', firstMoveCostInr: 0, firstMoveDays: 3 },
       { title: 'Home tuition for kids', whoItServes: 'parents nearby', whyYou: 'Fits 2–3 hours a day', firstTest: 'Offer a free trial class to 3 parents', objective: 'I want to teach kids at home', firstMoveCostInr: 0, firstMoveDays: 5 },
@@ -70,12 +94,14 @@ function model(prompt: string): unknown {
     prompts.push({ kind: 'moving', text: prompt });
     if (/loved the animal round/.test(last)) return { intent: 'SIGNAL', reply: 'That’s a great sign!', signal: { summary: '5 of 6 friends finished the sample; they loved the animal round', polarity: 'POSITIVE', outcome: false } };
     if (/only have ₹500/.test(last)) return { intent: 'CORRECTION', reply: 'Noted — ₹500 it is.', budgetInr: 500 };
+    if (/^Two replied/.test(last)) return { intent: 'SIGNAL', reply: "That's useful. One person is already asking about price. Let's test whether the offer is valuable enough to pay for.", signal: { summary: 'Two cafes replied; one asked for pricing', polarity: 'POSITIVE', outcome: false } };
     if (/what grade/.test(last)) return { intent: 'QUESTION', reply: 'Ages 8 to 12 — that’s who the sample is for.' };
     return { intent: 'OTHER', reply: 'Got it.' };
   }
   if (prompt.startsWith('You are Hippo —')) {
     prompts.push({ kind: 'turn', text: prompt });
     if (last.startsWith('I am 10 years old')) return { intent: 'OBJECTIVE', reply: 'Love it.', ready_to_propose: true, objective: 'Quiz books for kids, written by a kid', target: '5,000 books through ecommerce', current_state: 'Just an idea', has_business_idea: true };
+    if (last.startsWith('I want to make money quickly')) return { intent: 'DONT_KNOW', reply: 'No problem.', ready_to_propose: false, has_business_idea: false };
     if (last === LAKH) return { intent: 'DONT_KNOW', reply: 'No problem.', ready_to_propose: false, has_business_idea: false, objective: 'Make ₹1 lakh a month' };
     return { intent: 'ANSWER', reply: 'Nice — and how much time could you give it?', ready_to_propose: true, has_business_idea: false };
   }
@@ -112,6 +138,16 @@ async function mods() {
 }
 // What the founder must never be shown in the "I don't know" journey: report furniture, scores, choosing a research route.
 const NOT_FOUNDER_FACING = /\d+\s*\/\s*100|score|pathway|research question|evidence|sources|you decide|which (one|option) do you (want|choose)|lens|hypothes|dig in|report/i;
+const BEGINNER = 'I want to make money quickly. I know nothing about business. Something digital.';
+/** Beginner → two questions → Hippo's recommendation and first Move in ONE turn. */
+async function cafeStart(say: (t: string) => Promise<Row>) {
+  jar = new Map();
+  await say(BEGINNER);
+  await say("I'm on Instagram all day");
+  const before = Date.now();
+  const v = await say('No money, 2 hours a day');
+  return { v, before };
+}
 const lastHippo = (v: Row) => [...v.messages].reverse().find((m: Row) => m.role === 'HIPPO').text as string;
 
 describe.skipIf(!E2E)('V1 Moves (real Postgres)', () => {
@@ -242,7 +278,7 @@ describe.skipIf(!E2E)('V1 Moves (real Postgres)', () => {
     expect(v.state.directions).toHaveLength(3);
     const said = v.messages.filter((m: Row) => m.role === 'HIPPO').map((m: Row) => m.text).join('\n');
     expect(said).toMatch(/I think we should start with home-cooked lunch boxes — daily demand, and you can test it this week for free\./);
-    expect(said).toMatch(/I don't want you spending money building anything yet\. First step: Pre-order page shared in 2 office groups\. I'm setting that up now\./);
+    expect(said).toMatch(/I don't want you spending money building anything yet\.\n\nHere's our first move: Pre-order page for home-cooked lunch boxes near offices\.\nWhat I'll do: Make and host the page\.\nWhat I need from you: Share the link with 2 office groups\.\nWhat we're watching for: Pre-order requests in 3 days\./);
     expect(said).toMatch(/I also considered B\) weekend cooking classes and C\) festival sweets boxes — just say the letter\./);
     expect(said).not.toMatch(NOT_FOUNDER_FACING);
     // Hippo decided: the first Move exists without the founder picking anything.
@@ -292,6 +328,90 @@ describe.skipIf(!E2E)('V1 Moves (real Postgres)', () => {
     expect(v.move).not.toBeNull();
     expect(v.messages.some((m: Row) => m.role === 'HIPPO' && /I think we should start with/.test(m.text))).toBe(true);
     expect(JSON.stringify(v.messages)).not.toMatch(NOT_FOUNDER_FACING);
+  }, 60_000);
+
+  it('ONE turn: the recommendation, why, and the first Move (what I do / what you do / what we watch) — no second hand-off; "ok" accepts it', async () => {
+    const { db, say } = await mods();
+    let { v } = await cafeStart(say);
+    expect(v.state.profile.experience).toBe('NEW');
+    const lastFounder = v.messages.map((m: Row) => m.role).lastIndexOf('FOUNDER');
+    const after = v.messages.slice(lastFounder + 1);
+    expect(after).toHaveLength(1); // exactly one Hippo message
+    expect(after[0].text).toMatch(/^I've thought through a few directions\. I think we should start with instagram help for local cafes — you can start today for free/);
+    expect(after[0].text).toMatch(/Here's our first move: Send 5 local cafes a free one-page Instagram idea sheet\.\nWhat I'll do: Pick 5 cafes near you[^\n]*\nWhat I need from you: Send the 5 messages from your Instagram\.\nWhat we're watching for: Replies, questions about price, or a no\./);
+    expect(after[0].text).toMatch(/I also considered B\) reels editing for small gyms — just say the letter\.$/);
+    expect(after[0].text).not.toMatch(/chosen direction|which (one|option)|do you want/i);
+    expect(v.move).toMatchObject({ title: CAFE.move.title, status: 'READY' });
+    // A: "ok" means yes to the primary recommendation — no new choice, the same Move proceeds.
+    const moveId = v.move.id;
+    v = await say('ok');
+    expect(v.move).toMatchObject({ id: moveId, status: 'APPROVED' });
+    expect(lastHippo(v)).toBe("Let's do it. Everything I prepared is on the card above. Your part: Send the 5 messages from your Instagram. Then tell me what happened — even if nobody replied.");
+    expect(await db.move.count({ where: { objectiveId: (await db.move.findUnique({ where: { id: moveId } })).objectiveId } })).toBe(1);
+    const { movingControl } = await import('@/lib/hippo/moves');
+    expect(['ok', 'yes', 'sure', "let's do it", 'fine', 'Fine.', 'alright'].map(movingControl)).toEqual(Array(7).fill('YES'));
+  }, 60_000);
+
+  it('B: a founder who "knows nothing" never claims a business, clients or expertise in what Hippo writes for them', async () => {
+    const { say } = await mods();
+    const { v } = await cafeStart(say);
+    const prep = prompts.filter((p) => p.kind === 'prepare');
+    expect(prep.at(-2)!.text).toContain('SPEAKING AS THE FOUNDER (strict)');
+    expect(prep.at(-2)!.text).toContain('This founder is NEW to this');
+    expect(prep.at(-1)!.text).toMatch(/YOUR PREVIOUS VERSION WAS REJECTED[\s\S]*I run a digital marketing service/);
+    const md = v.move.artifact.markdown as string;
+    expect(md).toContain('I noticed a couple of simple things on your Instagram');
+    expect(md).not.toMatch(/I run|we have helped|agency|our clients/i);
+  }, 60_000);
+
+  it('C: "help me do this" — Hippo says what it can\'t do without approval and prepares everything else (founder work shrinks to one step)', async () => {
+    const { say } = await mods();
+    let { v } = await cafeStart(say);
+    v = await say('help me do this');
+    expect(v.messages.some((m: Row) => /^I can prepare everything, but I can't send it without your approval\./.test(m.text))).toBe(true);
+    expect(prompts.filter((p) => p.kind === 'move').at(-1)!.text).toMatch(/do far more of it[\s\S]*Do not just rewrite the same script/);
+    expect(v.move.title).toBe(CAFE_HELP.move.title);
+    expect(v.move.needs).toEqual(['Check the 5 messages and press send']);
+    // Even when the model keeps inventing credentials, they are removed before the founder sees them.
+    expect(v.move.artifact.markdown).not.toMatch(/I run a digital marketing service|we have helped/i);
+    expect(v.move.artifact.markdown).toContain('I noticed two simple things on your Instagram');
+  }, 60_000);
+
+  it('D: "I did it" → "What happened?" → a natural-language answer becomes a signal, goes into memory, and drives the next Move', async () => {
+    const { db, say } = await mods();
+    let { v } = await cafeStart(say);
+    const first = v.move.id;
+    await say('ok');
+    v = await say('I did it');
+    expect(lastHippo(v)).toMatch(/What happened\? Tell me even if nobody replied/);
+    expect(v.move).toMatchObject({ id: first, status: 'LIVE' });
+    v = await say('Two replied and one asked for pricing.');
+    expect(v.messages.some((m: Row) => /^That's useful\. One person is already asking about price\. Let's test whether the offer is valuable enough to pay for\./.test(m.text))).toBe(true);
+    expect(await db.outcome.findFirst({ where: { moveId: first } })).toMatchObject({ source: 'FOUNDER_REPORTED', polarity: 'POSITIVE', rung: 4 });
+    expect(await db.businessMemory.findFirst({ where: { refType: 'move-ledger', kind: 'OUTCOME', title: { contains: 'one asked for pricing' } } })).toBeTruthy();
+    expect(prompts.filter((p) => p.kind === 'move').at(-1)!.text).toContain('founder reported: Two cafes replied; one asked for pricing');
+    expect(v.move.title).toBe(CAFE_PRICE.move.title);
+    // Outcomes said in one breath ("I sent it… nobody replied") are signals too — even when the model doesn't label them.
+    v = await say('ok');
+    v = await say('I sent it to 5 cafes. Nobody replied.');
+    const neg = await db.outcome.findFirst({ where: { summary: { contains: 'Nobody replied' } } });
+    expect(neg).toMatchObject({ polarity: 'NEGATIVE', source: 'FOUNDER_REPORTED' });
+    expect(v.messages.some((m: Row) => /silence or a no tells us something real/.test(m.text))).toBe(true);
+    expect(v.move.title).toBe(CAFE_FOLLOWUP.move.title);
+    const { readSignal } = await import('@/lib/hippo/moves');
+    expect(readSignal('One person said they’re interested')?.polarity).toBe('POSITIVE');
+    expect(readSignal('I sent it but one person blocked me')?.polarity).toBe('NEGATIVE');
+  }, 60_000);
+
+  it('E: "I can\'t do this" — the same activity through another channel is rejected; the next Move is a materially different approach', async () => {
+    const { db, say } = await mods();
+    let { v } = await cafeStart(say);
+    const first = v.move.id;
+    v = await say("I can't do this, I'm scared to message strangers");
+    expect(await db.move.findUnique({ where: { id: first } })).toMatchObject({ status: 'DECLINED' });
+    const engine = prompts.filter((p) => p.kind === 'move').slice(-2).map((p) => p.text);
+    expect(engine[1]).toMatch(/YOUR PREVIOUS PROPOSAL WAS REJECTED[\s\S]*REPEATS_FAILED_ROUTE/); // "same thing via WhatsApp" refused
+    expect(v.move.title).toBe(CAFE_ALT.move.title);
   }, 60_000);
 
   it('UI + public surface: one pinned Move card, plain words, the native page (draft hidden, views and self-tests not counted) and the Ledger', async () => {

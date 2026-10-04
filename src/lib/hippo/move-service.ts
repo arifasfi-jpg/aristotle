@@ -18,8 +18,8 @@ import { HttpError, logActivity, remember } from './context';
 import { emptyState, type BusinessState } from './conversation';
 import {
   CONSEQUENCE_LABEL, CURRENT_STATUSES, DEEP_RESEARCH_PRICE_INR, emptyCapacity, fallbackMove, MOVE_SCHEMA, movePrompt, normaliseMove,
-  normalisePrepared, PREPARE_SCHEMA, preparePrompt, readFounderSignals, mergeCapacity, validateMove,
-  type MoveContext, type ProposedMove,
+  inventedClaims, normalisePrepared, PREPARE_SCHEMA, preparePrompt, readFounderSignals, mergeCapacity, stripClaims, validateMove,
+  type MoveContext, type Prepared, type ProposedMove,
 } from './moves';
 
 export const MOVE_JOB = 'HIPPO_MOVE';
@@ -34,10 +34,10 @@ export type MoveReason = 'START' | 'SIGNAL' | 'NEXT' | 'ANOTHER_WAY' | 'CANT' | 
 const REASON_TEXT: Record<MoveReason, string> = {
   START: 'first Move for this business', SIGNAL: 'the world responded to the last Move — learn from it and decide what to do next',
   NEXT: 'the founder asked what is next', ANOTHER_WAY: 'the founder wants a different route to the same objective',
-  CANT: "the founder can't or won't do the last Move — same objective, find another way", FAILED: 'the last Move failed — learn and change route',
-  HELP: 'the founder needs help — make the smallest first step of the current Move that Hippo can make easier, keeping the same objective',
+  CANT: "the founder can't or won't do the last Move — same objective, but a materially different activity (not the same thing through another channel or reworded)", FAILED: 'the last Move failed — learn and change route',
+  HELP: 'the founder needs help doing the last Move — keep the same goal but have Hippo do far more of it: prepare every piece (the exact message for each person, who to send it to first, what to reply when they answer) so the founder only has to approve and send. Do not just rewrite the same script',
   CHANGE: 'the founder asked to change the Move', CORRECTION: "the founder's constraints changed — the last Move no longer fits",
-  DIRECTION: 'the founder chose a direction — first Move for it',
+  DIRECTION: 'Hippo recommended this direction — first Move for it (do not ask the founder to choose anything)',
 };
 
 // ---------------------------------------------------------------- reading state
@@ -78,7 +78,7 @@ export async function moveContext(objectiveId: string, reason: MoveReason, opts:
     profile: s.profile || {}, capacity: s.capacity || emptyCapacity(), beliefs,
     history: history.map((h) => ({ title: h.title, kind: h.kind, routeKey: h.routeKey, status: h.status, closeReason: h.closeReason, negative: negative.has(h.id) })),
     signals: outcomes.map((o) => ({ summary: o.summary, polarity: o.polarity || 'NEUTRAL', source: o.source || 'FOUNDER_REPORTED', at: o.createdAt.toISOString() })),
-    reason: REASON_TEXT[reason], instruction: opts.instruction, blockedRoutes: opts.blockedRoutes || [], research, company: objective.companyName,
+    reason: REASON_TEXT[reason], reasonCode: reason, instruction: opts.instruction, blockedRoutes: opts.blockedRoutes || [], research, company: objective.companyName,
   };
   return { ctx, objective };
 }
@@ -150,9 +150,19 @@ export async function prepareMove(moveId: string, usage: Parameters<typeof gener
   const move = await db.move.findUniqueOrThrow({ where: { id: moveId } });
   if (move.status !== 'PREPARING') return move;
   const { ctx } = await moveContext(move.objectiveId, 'NEXT');
-  const r = await generateJson<unknown>('move-prepare', preparePrompt({ ...move, needs: move.needs as string[] }, ctx), PREPARE_SCHEMA, {}, usage);
-  const prepared = normalisePrepared(r.data, move.artifactType);
+  const write = (problems: string[] = []) => generateJson<unknown>('move-prepare', preparePrompt({ ...move, needs: move.needs as string[] }, ctx, problems), PREPARE_SCHEMA, {}, usage);
+  const claimsIn = (p: Prepared) => inventedClaims([p.markdown, p.page?.headline, p.page?.subhead, p.page?.body].filter(Boolean).join('\n'), ctx.profile, ctx.capacity);
+  let r = await write();
+  let prepared = normalisePrepared(r.data, move.artifactType);
   if (!prepared) throw new Error('MOVE_PREPARE_INVALID: the prepared artifact was unusable');
+  // The founder never claims experience, clients or a business they haven't told us about.
+  const invented = claimsIn(prepared);
+  if (invented.length) {
+    r = await write(invented);
+    prepared = normalisePrepared(r.data, move.artifactType) ?? prepared;
+    const still = claimsIn(prepared);
+    if (still.length) prepared = { ...prepared, markdown: stripClaims(prepared.markdown, still), ...(prepared.page ? { page: { ...prepared.page, body: stripClaims(prepared.page.body, still) } } : {}) };
+  }
   let data: Prisma.MoveUpdateInput;
   if (move.artifactType === 'PUBLIC_PAGE' && prepared.page) {
     const slug = `${slugify(prepared.page.headline)}-${crypto.randomBytes(3).toString('hex')}`;
@@ -171,7 +181,13 @@ export async function prepareMove(moveId: string, usage: Parameters<typeof gener
 }
 
 // ---------------------------------------------------------------- the background job: PLAN → PREPARE
-type MoveJobState = { reason: MoveReason; instruction?: string; blockedRoutes?: string[]; fromMoveId?: string | null; moveId?: string } | null;
+type MoveJobState = { reason: MoveReason; instruction?: string; blockedRoutes?: string[]; fromMoveId?: string | null; moveId?: string; intro?: string; outro?: string } | null;
+
+/** The first Move in Hippo's words: what we're doing, what Hippo does, what the founder does, what we're watching for. */
+export function moveTurnText(m: { title: string; hippoWill: string; needs: string[]; expectedSignal: string }, intro?: string, outro?: string) {
+  const block = `Here's our first move: ${m.title.replace(/\.$/, '')}.\nWhat I'll do: ${m.hippoWill.replace(/\.$/, '')}.${m.needs.length ? `\nWhat I need from you: ${m.needs.map((n) => n.replace(/\.$/, '')).join('; ')}.` : ''}\nWhat we're watching for: ${m.expectedSignal.replace(/\.$/, '')}.`;
+  return [intro, block, outro].filter(Boolean).join('\n\n');
+}
 const usageOf = (job: Job, objective: { organizationId: string; id: string }) => ({ userId: job.userId, organizationId: objective.organizationId, objectiveId: objective.id, parentType: 'JOB' as const, parentId: job.budgetScopeId, budget: policyOf(job) });
 const policyOf = (job: Job) => ({ scope: { type: 'JOB' as const, id: job.budgetScopeId }, includedInr: job.budgetInr, warningInr: job.budgetInr * 0.9, nearLimitInr: job.budgetInr * 0.95, perCallInr: callCeilingInr(), canAskFounder: false });
 
@@ -189,7 +205,9 @@ const handler: JobHandler = {
       await renewLease(job, workerId);
       const conv = await conversationFor(objective.id);
       const saved = await saveMove(objective, planned, { reason: st.reason, previousMoveId: st.fromMoveId, conversationId: conv?.id });
-      await hippoSays(objective.id, planned.move.reply || `Here's what I think we should do next: ${planned.move.title}.`, 'MOVE', { moveId: saved.id });
+      // After a recommendation, one coherent turn: the recommendation and its first Move together (no second hand-off message).
+      const text = st.intro ? moveTurnText(planned.move, st.intro, st.outro) : planned.move.reply || `Here's what I think we should do next: ${planned.move.title}.`;
+      await hippoSays(objective.id, text, st.intro ? 'DIRECTIONS' : 'MOVE', { moveId: saved.id });
       return { checkpoint: 'PLANNED', progress: 'ANALYSING', state: json({ ...st, moveId: saved.id }) };
     }
     const move = await db.move.findUnique({ where: { id: st.moveId } });
@@ -203,7 +221,7 @@ const handler: JobHandler = {
     if (st?.moveId) {
       await db.move.updateMany({ where: { id: st.moveId, status: 'PREPARING' }, data: { status: 'PROPOSED' } });
       await hippoSays(objectiveId, "I couldn't finish preparing that just now. Say \"help me\" and I'll have another go.", 'MOVE_ERROR');
-    } else await hippoSays(objectiveId, "I couldn't work out the next move just now. Say \"what's next\" and I'll try again.", 'MOVE_ERROR');
+    } else await hippoSays(objectiveId, `${st?.intro ? `${st.intro}\n\n` : ''}I couldn't set up the ${st?.intro ? 'first step' : 'next move'} just now. Say "what's next" and I'll try again.`, 'MOVE_ERROR');
   },
 };
 registerJobHandler(MOVE_JOB, handler);
@@ -214,12 +232,12 @@ export async function activeMoveJob(objectiveId: string) {
 }
 
 /** Asks Hippo for the next Move (background job, resumed from the founder's polls). Reuses an in-flight request. */
-export async function requestMove(objective: { id: string; organizationId: string }, userId: string, reason: MoveReason, opts: { instruction?: string; blockedRoutes?: string[]; fromMoveId?: string | null } = {}) {
+export async function requestMove(objective: { id: string; organizationId: string }, userId: string, reason: MoveReason, opts: { instruction?: string; blockedRoutes?: string[]; fromMoveId?: string | null; intro?: string; outro?: string } = {}) {
   const active = await activeMoveJob(objective.id);
   if (active) { await resumeIfDue(active, MOVE_RUN_MS); return active; }
   const id = crypto.randomUUID();
   const { job } = await enqueueJob({ type: MOVE_JOB, userId, organizationId: objective.organizationId, subjectType: 'MOVE_REQUEST', subjectId: `${objective.id}:${id}`, budgetScope: { type: 'JOB', id }, budgetInr: moveJobBudgetInr() });
-  await db.job.update({ where: { id: job.id }, data: { state: json({ reason, instruction: opts.instruction, blockedRoutes: opts.blockedRoutes, fromMoveId: opts.fromMoveId ?? null }) } });
+  await db.job.update({ where: { id: job.id }, data: { state: json({ reason, instruction: opts.instruction, blockedRoutes: opts.blockedRoutes, fromMoveId: opts.fromMoveId ?? null, intro: opts.intro, outro: opts.outro }) } });
   await kickJob(job.id, Date.now(), MOVE_RUN_MS);
   return job;
 }

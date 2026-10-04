@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   consequentialReasons, emptyCapacity, fallbackMove, materialChange, mergeCapacity, mergeProfile, movesEnabled, movingControl, normaliseMove,
-  readFounderSignals, readSignal, validateMove, type MoveContext, type ProposedMove,
+  inventedClaims, readFounderSignals, readSignal, stripClaims, validateMove, type MoveContext, type ProposedMove,
 } from '../src/lib/hippo/moves';
 
 const move = (o: Partial<ProposedMove> = {}): ProposedMove => ({
@@ -114,6 +114,25 @@ describe('validation: constraints, preferences, known facts and history', () => 
   });
 });
 
+describe('the founder never claims what they have not told us', () => {
+  it('flags invented credentials for a newcomer, allows them for an experienced founder, and strips them', () => {
+    const draft = 'Hi! I run a digital marketing service and we have helped cafes grow. I noticed two simple things on your Instagram.';
+    const claims = inventedClaims(draft, { experience: 'NEW' });
+    expect(claims).toEqual(['I run a digital marketing service and we have helped cafes grow.']);
+    expect(inventedClaims('As our clients know, I have 10 years of experience.', {})).toHaveLength(1);
+    expect(inventedClaims(draft, { experience: 'EXPERIENCED' })).toEqual([]);
+    expect(inventedClaims('I noticed a couple of simple things on your Instagram. Want me to send it?', { experience: 'NEW' })).toEqual([]);
+    expect(stripClaims(draft, claims).trim()).toBe('Hi! I noticed two simple things on your Instagram.');
+    expect(readFounderSignals('I know nothing about business').profile.experience).toBe('NEW');
+  });
+  it('after "I can\'t", the same activity through another channel counts as the same route', () => {
+    const history = [{ title: 'Send 5 local cafes a free one-page Instagram idea sheet', kind: 'SELL', routeKey: 'cafe-instagram-dms', status: 'DECLINED' }];
+    const reworded = move({ title: 'Send 5 local cafes a free Instagram idea sheet on WhatsApp', routeKey: 'cafe-whatsapp-messages' });
+    expect(validateMove(reworded, ctx({ history, reasonCode: 'CANT' })).problems.join()).toMatch(/REPEATS_FAILED_ROUTE/);
+    expect(validateMove(move({ title: 'Ask 3 shop owners you already know what is hard about Instagram', routeKey: 'ask-known-owners' }), ctx({ history, reasonCode: 'CANT' })).ok).toBe(true);
+  });
+});
+
 describe('conversation controls and signals (no model needed)', () => {
   it('escape routes and quick replies', () => {
     expect(['Yes', 'Not now', 'Help me do this', 'Try another way', "I can't do this", 'This failed', 'I sent it', "What's next?", 'Why?'].map(movingControl))
@@ -126,6 +145,9 @@ describe('conversation controls and signals (no model needed)', () => {
     expect(readSignal('One person paid ₹149')).toMatchObject({ polarity: 'POSITIVE', rung: 5, moneyInr: 149 });
     expect(readSignal('The printer quoted ₹70 a copy')).toMatchObject({ polarity: 'NEUTRAL', rung: 4 });
     expect(readSignal('Everyone hated the sample')).toMatchObject({ polarity: 'NEGATIVE' });
+    expect(readSignal('Two replied and one asked for pricing')).toMatchObject({ polarity: 'POSITIVE', rung: 4 });
+    expect(readSignal('I sent it to 5 cafes. Nobody replied.')).toMatchObject({ polarity: 'NEGATIVE' });
+    expect(readSignal('I sent it but one person blocked me')).toMatchObject({ polarity: 'NEGATIVE' });
     expect(readSignal('posted here https://instagram.com/p/abc')?.proof ?? readSignal('they replied https://wa.me/x')?.proof).toMatch(/^https:/);
     expect(readSignal('hmm ok')).toBeNull();
   });

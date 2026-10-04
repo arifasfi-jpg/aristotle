@@ -86,6 +86,7 @@ export type MoveAction = 'YES' | 'NOT_NOW' | 'RESUME' | 'HELP' | 'ANOTHER_WAY' |
 export async function applyMoveAction(ctx: { userId: string; founderId: string }, objective: { id: string; organizationId: string }, action: MoveAction, opts: { text?: string; proof?: string; guardian?: boolean } = {}): Promise<string> {
   const move = await currentMove(objective.id);
   if (!move) {
+    if (await activeMoveJob(objective.id)) return "I'm setting it up now — it'll appear above in a moment.";
     if (action === 'NEXT' || action === 'YES' || action === 'RESUME') { await requestMove(objective, ctx.userId, 'NEXT'); return 'On it — working out the next move.'; }
     return "There's nothing on the table right now. Say \"what's next\" and I'll work out the next move.";
   }
@@ -98,7 +99,8 @@ export async function applyMoveAction(ctx: { userId: string; founderId: string }
       if (m.status === 'LIVE' && m.proof) return `It's live: ${m.proof}\nShare it with the people we talked about. I'll see every response and tell you.`;
       if (m.status === 'PREPARING') return "OK — I'll put it out as soon as it's ready.";
       if (m.artifactType === 'DEEP_RESEARCH') return "OK — start the analysis from the card. It's a one-time payment and you'll see exactly what it covers first.";
-      return 'Great — go for it. Then tell me what happened, even if nobody replied.';
+      const needs = (move.needs as string[]).map((n) => n.replace(/\.$/, ''));
+      return `Let's do it. Everything I prepared is on the card above.${needs.length ? ` Your part: ${needs.join('; ')}.` : ''} Then tell me what happened — even if nobody replied.`;
     }
     case 'NOT_NOW': await parkMove(move.id, actor, true); return "Parked. Nothing's lost — say “bring it back” when you're ready.";
     case 'RESUME': await parkMove(move.id, actor, false); return "Back on the table.";
@@ -107,7 +109,9 @@ export async function applyMoveAction(ctx: { userId: string; founderId: string }
     case 'NEXT':
       if (!['LIVE', 'SIGNALLED'].includes(move.status)) return "Let's get this one out first — or say “try another way” if it doesn't fit.";
       await rerouteMove(move.id, actor, 'NEXT'); return 'Let me work out what this tells us and what to do next.';
-    case 'HELP': await rerouteMove(move.id, actor, 'HELP', opts.text); return "Let me make that easier — I'll break it into a smaller first step and do more of it for you.";
+    case 'HELP': await rerouteMove(move.id, actor, 'HELP', opts.text); return move.owner === 'FOUNDER'
+      ? "I can prepare everything, but I can't send it without your approval. I'm getting it down to the point where you only check it and press send — who to send it to first, the exact message for each, and what to reply if they answer."
+      : "Let me make that easier — I'll do more of it myself and keep your part to a yes.";
     case 'ANOTHER_WAY': await rerouteMove(move.id, actor, 'ANOTHER_WAY', opts.text); return 'Same goal, different route — give me a moment.';
     case 'CANT': await rerouteMove(move.id, actor, 'CANT', opts.text); return "Understood. The goal stays — I'll find another way that works for you.";
     case 'FAILED': await rerouteMove(move.id, actor, 'FAILED', opts.text); return "That's useful to know — it rules something out. Let me rethink the route.";
@@ -121,15 +125,15 @@ async function handoff(ctx: Ctx, convId: string, s: BusinessState, reason: 'STAR
   const created = await createObjective(ctx, { text: handoffText(s), mode: s.directions?.length ? 'EXPLORE' : 'IDEA', understanding: u });
   const objective = await db.objective.findUniqueOrThrow({ where: { id: created.objectiveId }, select: { id: true, organizationId: true } });
   await db.conversation.update({ where: { id: convId }, data: { phase: 'MOVING', status: 'ACTIVE', objectiveId: objective.id, state: json(s) } });
-  return { objective, start: () => requestMove(objective, ctx.user.id, reason, { instruction }) };
+  return { objective, start: (words: { intro?: string; outro?: string } = {}) => requestMove(objective, ctx.user.id, reason, { instruction, ...words }) };
 }
 
-async function startDirection(ctx: Ctx, convId: string, s: BusinessState, i: number) {
+async function startDirection(ctx: Ctx, convId: string, s: BusinessState, i: number, words: { intro?: string; outro?: string } = {}) {
   const d = s.directions![i];
   s.objective = { value: d.objective.slice(0, 300), provenance: 'FOUNDER' };
   s.noIdea = false; s.chosen = i;
   const h = await handoff(ctx, convId, s, 'DIRECTION', `Chosen direction: ${d.title} (for ${d.whoItServes}). Why it fits: ${d.whyYou}. Suggested first step: ${d.firstTest}`);
-  await h.start();
+  await h.start(words);
 }
 
 function pickDirection(text: string, s: BusinessState): number | null {
@@ -142,11 +146,14 @@ function pickDirection(text: string, s: BusinessState): number | null {
   return i >= 0 ? i : null;
 }
 
-/** Hippo's call: one recommended direction (which becomes the first Move right away) and, at most, two alternatives. */
-const recommendationText = (s: BusinessState) => {
+/** Hippo's call in words: the recommended direction and why (intro), and at most two alternatives (outro). The first Move's
+ *  details go between them, so the founder gets one coherent turn. */
+const recommendation = (s: BusinessState) => {
   const d = s.directions!; const r = s.recommended ?? 0; const rec = d[r];
   const others = d.map((x, i) => ({ x, i })).filter(({ i }) => i !== r);
-  return `I've thought through a few directions. ${s.recommendWhy ? `I think we should start with ${rec.title.toLowerCase()} — ${s.recommendWhy.replace(/\.$/, '')}.` : `I think we should start with ${rec.title.toLowerCase()}, for ${rec.whoItServes}.`}\n\nI don't want you spending money building anything yet. First step: ${rec.firstTest.replace(/\.$/, '')}. I'm setting that up now.${others.length ? `\n\nIf it doesn't feel right, I also considered ${others.map(({ x, i }) => `${'ABC'[i]}) ${x.title.toLowerCase()}`).join(' and ')} — just say the letter.` : ''}`;
+  const intro = `I've thought through a few directions. ${s.recommendWhy ? `I think we should start with ${rec.title.toLowerCase()} — ${s.recommendWhy.replace(/\.$/, '')}.` : `I think we should start with ${rec.title.toLowerCase()}, for ${rec.whoItServes}.`}\n\nI don't want you spending money building anything yet.`;
+  const outro = others.length ? `If it doesn't feel right, I also considered ${others.map(({ x, i }) => `${'ABC'[i]}) ${x.title.toLowerCase()}`).join(' and ')} — just say the letter.` : '';
+  return { intro, outro };
 };
 
 // ---------------------------------------------------------------- one founder message
@@ -171,11 +178,11 @@ export async function postMoveMessage(ctx: Ctx, conv: { id: string; phase: strin
     if (alt !== null && alt !== (s.chosen ?? s.recommended ?? 0) && s.directions?.[alt]) {
       const m = await currentMove(objective.id);
       if (m) await db.move.update({ where: { id: m.id }, data: { status: 'SUPERSEDED', closeReason: 'founder chose another direction' } });
-      await say(`OK — ${s.directions[alt].title.toLowerCase()} instead. Give me a moment — I'm working out the first move.`);
-      await startDirection(ctx, conv.id, s, alt);
+      await startDirection(ctx, conv.id, s, alt, { intro: `OK — ${s.directions[alt].title.toLowerCase()} instead.` });
       return;
     }
-    const control = movingControl(text) as MoveControl | null;
+    let control = movingControl(text) as MoveControl | null;
+    if (control === 'DID_IT' && readSignal(text)) control = null; // they already told us what happened — treat it as a signal
     if (control) { await say(await applyMoveAction(actor, objective, control, { text, proof: proofIn(text) })); return; }
     const move = await currentMove(objective.id);
     let turn = null;
@@ -185,7 +192,7 @@ export async function postMoveMessage(ctx: Ctx, conv: { id: string; phase: strin
       console.log(JSON.stringify({ event: 'hippo_move_turn', conversationId: conv.id, ...aiMeta(r) }));
     } catch (e) { console.error(JSON.stringify({ event: 'hippo_move_turn_fallback', error: e instanceof Error ? e.message.slice(0, 200) : String(e) })); }
     const sig = readSignal(text);
-    const intent = turn?.intent ?? (sig ? 'SIGNAL' : 'OTHER');
+    const intent = turn?.intent && !(turn.intent === 'OTHER' && sig) ? turn.intent : sig ? 'SIGNAL' : 'OTHER'; // a plain outcome is never lost
     // Constraints the founder stated (deterministic reading + the model's literal extraction).
     s.capacity = mergeCapacity(s.capacity, { avoid: turn?.avoid ?? [], assets: turn?.assets ?? [], ...(turn?.budgetInr !== undefined && read.capacity.budgetInr === undefined ? { budgetInr: turn.budgetInr } : {}), ...(turn?.existingCustomers !== undefined && read.capacity.existingCustomers === undefined ? { existingCustomers: turn.existingCustomers } : {}) });
     await db.conversation.update({ where: { id: conv.id }, data: { state: json(s) } });
@@ -200,7 +207,8 @@ export async function postMoveMessage(ctx: Ctx, conv: { id: string; phase: strin
     if (intent === 'SIGNAL' && move && (turn?.signal || sig)) {
       const polarity = turn?.signal?.polarity ?? sig!.polarity;
       const rung = (turn?.signal?.outcome || sig?.rung === 5) ? 5 : 4;
-      await say(`${turn?.reply || 'Got it — noted.'}\n\nLet me work out what this means for our next move.`);
+      const ack = polarity === 'NEGATIVE' ? "That's useful — silence or a no tells us something real." : polarity === 'POSITIVE' ? "That's useful — someone out there responded." : "That's useful to know.";
+      await say(`${(turn?.intent === 'SIGNAL' && turn.reply) || ack}\n\nLet me work out what this means for our next move.`);
       await recordSignal(move.id, { summary: turn?.signal?.summary || text.slice(0, 400), polarity, rung, source: 'FOUNDER_REPORTED', proof: proofIn(text) });
       await rerouteMove(move.id, actor, 'SIGNAL', text);
       return;
@@ -222,8 +230,7 @@ export async function postMoveMessage(ctx: Ctx, conv: { id: string; phase: strin
   const phase = conv.phase as Phase;
   const choice = pickDirection(text, s);
   if (choice !== null && s.directions?.[choice]) {
-    await say(`${s.directions[choice].title} it is. Give me a moment — I'm working out the first move.`);
-    await startDirection(ctx, conv.id, s, choice);
+    await startDirection(ctx, conv.id, s, choice, { intro: `${s.directions[choice].title} it is.` });
     return;
   }
   let raw: unknown = null;
@@ -260,9 +267,8 @@ has_business_idea: false only when the founder has no product or business in min
       const d = await generateJson<unknown>('explore', directionsPrompt(about, { budgetInr: ns.capacity?.budgetInr, hoursPerWeek: ns.capacity?.hoursPerWeek, avoid: ns.capacity?.avoid ?? [], minor: ns.profile?.minor }), DIRECTIONS_SCHEMA, {}, usage);
       const c = normaliseDirectionChoice(d.data);
       Object.assign(ns, { directions: c.directions, recommended: c.recommended, recommendWhy: c.why });
-      await say(recommendationText(ns), { kind: 'DIRECTIONS' });
       await db.conversation.update({ where: { id: conv.id }, data: { state: json(ns), phase: 'DISCOVER', status: 'ACTIVE' } });
-      await startDirection(ctx, conv.id, ns, ns.recommended ?? 0); // Hippo decides; the founder doesn't have to pick
+      await startDirection(ctx, conv.id, ns, ns.recommended ?? 0, recommendation(ns)); // Hippo decides; the founder doesn't have to pick
       return;
     } catch (e) {
       console.error(JSON.stringify({ event: 'hippo_directions_failed', error: e instanceof Error ? e.message.slice(0, 200) : String(e) }));

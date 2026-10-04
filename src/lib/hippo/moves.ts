@@ -194,7 +194,7 @@ export type PastMove = { title: string; kind: string; routeKey: string; status: 
 export type MoveContext = {
   objective: string; target?: string; today?: string; constraints: string[]; knownFacts: { key: string; quote: string }[]; unknowns: string[];
   preferences: string[]; profile: FounderProfile; capacity: Capacity; beliefs: { statement: string; confidence: string; evidence: string }[];
-  history: PastMove[]; signals: { summary: string; polarity: string; source: string; at: string }[];
+  history: PastMove[]; signals: { summary: string; polarity: string; source: string; at: string; rung?: number }[];
   reason: string; reasonCode?: string; instruction?: string; blockedRoutes: string[]; research?: string; company?: string | null;
 };
 
@@ -203,6 +203,30 @@ const words = (s: string) => n0(s).replace(/[^a-z0-9 ]+/g, ' ').split(' ').filte
 const stem = (w: string) => w.replace(/(ies|es|s)$/, '');
 const mentions = (text: string, w: string) => new RegExp(`\\b${stem(w)}(s|es|ies|y)?\\b`).test(n0(text));
 const similar = (a: string, b: string) => { const A = new Set(words(a).map(stem)); const B = new Set(words(b).map(stem)); if (!A.size || !B.size) return 0; let i = 0; for (const x of A) if (B.has(x)) i++; return i / Math.min(A.size, B.size); };
+
+// ---------------------------------------------------------------- what the world has told us so far (internal)
+const DEMAND_RE = /\b(price|pricing|how much|cost|rates?|book(ed|ing)?|order(ed)?|pre-?order|pay|paid|sign(ed)? up|trial|when can|where can i)\b/;
+/** Where the business is, read from its signals: is the problem evidenced, is there demand, has anyone paid, and did the last
+ *  route get nothing? Founder-reported evidence counts (as evidence for this business, not as a market fact). */
+export function learningStage(signals: MoveContext['signals'], history: MoveContext['history'] = []) {
+  const pos = signals.filter((x) => x.polarity !== 'NEGATIVE');
+  const paid = signals.some((x) => x.rung === 5 && x.polarity !== 'NEGATIVE');
+  const demand = paid || pos.some((x) => DEMAND_RE.test(n0(x.summary)));
+  const problem = demand || pos.some((x) => x.polarity === 'POSITIVE' || /\b(need|needs|needed|problem|struggle|hard|pain|frustrat\w*|no time|(don'?t|do not) have (the )?time|discomfort|uncomfortable|expensive|costly|cost|travel|difficult|hate|annoying|wish)\b/.test(n0(x.summary)));
+  const last = history.filter((h) => !['SUPERSEDED', 'PROPOSED', 'PREPARING', 'READY'].includes(h.status)).at(-1);
+  const lastNegative = Boolean(last && (last.negative || last.status === 'FAILED'));
+  const stage = paid ? 'PAID' : demand ? 'DEMAND' : problem ? 'PROBLEM_EVIDENCED' : 'UNTESTED';
+  return { stage, problem, demand, paid, lastNegative, lastTitle: last?.title };
+}
+const STAGE_GUIDE: Record<string, string> = {
+  UNTESTED: 'Nothing from the real world yet. The first job is a real reaction to the problem or offer.',
+  PROBLEM_EVIDENCED: 'The founder has already heard the problem from real people (above). Do NOT ask them to rediscover it: no more generic interviews, surveys or "ask a few people what they think" unless one specific unresolved question blocks the next action (then name it in researchJustification). Next: the cheapest way to prove we can actually DELIVER the solution — by hand, for a few real customers (a concierge test: find the supply, deliver manually, test the logistics and the price) — and whether they will book or pay. No app, platform or website build yet.',
+  DEMAND: 'Real people are asking about price, booking or ordering. Do NOT go back to awareness outreach or more interviews. Next: turn interest into a commitment — a concrete offer with a price, a paid trial, a booking, or the first delivery — and learn what it takes to deliver.',
+  PAID: 'Someone has paid. Next: deliver it well, learn what delivery really takes, get the next paying customer, and only then automate what hurts.',
+};
+const DISCOVERY_RE = /\b(interview|survey|questionnaire|ask (\w+ ){0,4}(about|what|whether|if|them|people|women|users|customers|potential)|talk to (\w+ ){0,4}(about|users|customers|people|women|potential)|find out (what|whether|if)|frustrations|pain points|understand (what|their)|potential users|feedback on the idea|validate (the )?(problem|idea))\b/;
+const SOFTWARE_RE = /\b(app|platform|software|website|marketplace|mvp|portal|code)\b/;
+const MORE_OF_SAME_RE = /\b(\d{2,}\s+more|more (\w+ ){0,2}(cafes|people|customers|shops|groups|contacts|messages|outreach)|again|another round|bigger list|wider)\b/;
 
 /**
  * Accepts or rejects a proposed Move against the founder's constraints and the business's history, and sets its
@@ -222,6 +246,15 @@ export function validateMove(m: ProposedMove, ctx: MoveContext): { ok: boolean; 
   if (m.artifactType === 'PUBLIC_PAGE' && m.owner !== 'HIPPO') problems.push('WRONG_OWNER: Hippo hosts public pages itself (owner HIPPO).');
   if (m.kind === 'RESEARCH' && !m.researchJustification) problems.push('RESEARCH_NOT_JUSTIFIED: prefer a Move that reaches a real person; research only when it is clearly the highest-leverage step (say why).');
   if ((ctx.capacity.existingCustomers ?? 0) > 0 && /\b(first|initial)\s+(\d+\s+)?(customers?|buyers?|sales?|users?)\b/.test(n0(text))) problems.push(`IGNORES_KNOWN_FACT: the founder already has ${ctx.capacity.existingCustomers} customers.`);
+  // Learning: what the world already said changes what the next Move may be.
+  const L = learningStage(ctx.signals, ctx.history);
+  const said = n0([m.title, m.hippoWill, m.artifactBrief].join(' '));
+  const commercial = /(₹|\b(price|pricing|pay|paid|book|booking|order|pre-?order|trial|deliver|delivery|pickup|sell|offer|charge)\b)/.test(said);
+  if (L.problem && !L.paid && DISCOVERY_RE.test(said) && !commercial && !m.researchJustification)
+    problems.push('REDISCOVERY: the founder already reported what real people said about the problem — do not ask them to find it out again. Use it: test whether we can deliver the solution for a few real customers and whether they will book or pay.');
+  if (L.problem && !L.paid && m.kind === 'BUILD' && SOFTWARE_RE.test(said)) problems.push('PREMATURE_SOFTWARE: prove the solution can be delivered by hand and that people pay before building an app, platform or website.');
+  if (L.demand && MORE_OF_SAME_RE.test(said) && !/\b(price|offer|trial|book|pay|order)\b/.test(said)) problems.push('AWARENESS_AFTER_DEMAND: people are already asking about price or booking — move to an offer, price, trial or booking, not more outreach.');
+  if (L.lastNegative && L.lastTitle && MORE_OF_SAME_RE.test(said) && similar(L.lastTitle, m.title) >= 0.3) problems.push(`MORE_OF_THE_SAME: "${L.lastTitle}" got no response — change the approach or the offer instead of doing more of it.`);
   const blocked = new Set(ctx.blockedRoutes);
   for (const p of ctx.history) {
     const failed = ['FAILED', 'DECLINED'].includes(p.status) || p.negative;
@@ -239,6 +272,17 @@ export function validateMove(m: ProposedMove, ctx: MoveContext): { ok: boolean; 
 /** A safe Move when the model is unavailable or keeps proposing invalid ones: Hippo prepares, the founder hands it over. */
 export function fallbackMove(ctx: MoveContext): ProposedMove {
   const minor = Boolean(ctx.profile.minor);
+  if (learningStage(ctx.signals, ctx.history).problem) return {
+    kind: 'TEST', owner: 'FOUNDER', title: 'Deliver it by hand for one real customer this week',
+    why: 'People already told you the problem is real — now find out if we can actually solve it for someone, before building anything.',
+    bet: 'One real customer will take it up, and doing it by hand shows what delivery really needs.',
+    hippoWill: 'Write the offer, a simple step-by-step of how you deliver it by hand, a price to try, and what to note while doing it.',
+    needs: [minor ? 'Do it with a parent' : 'Offer it to one of the people who said they need it', 'Deliver it and note what was hard'],
+    costInr: 0, costBasis: 'free', expectedSignal: 'Whether they take it up, what they would pay, and what was hard to deliver',
+    artifactType: 'DOCUMENT', artifactBrief: 'Offer, by-hand delivery steps, a price to try, and a notes table.',
+    routeKey: 'deliver by hand once', consequential: false, researchJustification: '', alternative: null,
+    reply: "You've already heard the problem from real people. Let's see if we can actually solve it for one of them.", beliefs: [],
+  };
   return {
     kind: 'TALK', owner: 'FOUNDER', title: 'Show your idea to 3 people who might buy it and note what they say',
     why: "The fastest way to learn if this is worth your time is a real person's reaction — before spending anything.",
@@ -295,8 +339,10 @@ WORKING BELIEFS (Hippo's current hypotheses — update them):
 ${ctx.beliefs.map((b) => `- [${b.confidence}] ${b.statement} (evidence: ${b.evidence || 'none yet'})`).join('\n') || '- none yet'}
 WHAT HAS HAPPENED (most recent last):
 ${ctx.history.map((h) => `- Move "${h.title}" [${h.kind}] → ${h.status}${h.closeReason ? ` (${h.closeReason})` : ''}`).join('\n') || '- nothing yet (this is the first Move)'}
-WHAT THE WORLD SAID:
-${ctx.signals.map((s) => `- ${s.source === 'SYSTEM_OBSERVED' ? 'seen by Hippo' : 'founder reported'}: ${s.summary} (${s.polarity.toLowerCase()})`).join('\n') || '- no signals yet'}
+WHAT THE WORLD SAID (founder reported = real people told the founder: meaningful evidence for this business, not a market fact; seen by Hippo = observed directly; paid = verified commercial outcome):
+${ctx.signals.map((s) => `- ${s.rung === 5 && s.polarity !== 'NEGATIVE' ? 'PAID / committed' : s.source === 'SYSTEM_OBSERVED' ? 'seen by Hippo' : 'founder reported'}: ${s.summary} (${s.polarity.toLowerCase()})`).join('\n') || '- no signals yet'}
+WHERE THIS BUSINESS IS NOW (internal — never name stages to the founder): ${STAGE_GUIDE[learningStage(ctx.signals, ctx.history).stage]}
+The order is: real problem → can we deliver it (by hand) → will they pay → what delivery really takes → improve → only then software → scale. Never step backwards to a stage the evidence has already passed.
 DO NOT REPEAT THESE ROUTES (failed, declined or the founder asked for another way): ${[...new Set([...ctx.blockedRoutes, ...ctx.history.filter((h) => ['FAILED', 'DECLINED'].includes(h.status) || h.negative).map((h) => h.routeKey)])].join(', ') || 'none'}
 WHY A NEW MOVE NOW: ${ctx.reason}${ctx.instruction ? ` — founder said: "${ctx.instruction}"` : ''}
 ${ctx.research ? `RESEARCH EVIDENCE (use it to sharpen the Move; do not turn the Move into research):\n${ctx.research.slice(0, 4000)}\n` : ''}
@@ -320,7 +366,7 @@ RULES:
 - expectedSignal: the concrete response from the world we are watching for. bet: the hypothesis this tests.
 - routeKey: 2–5 word label of the approach. title: plain words, max 12 words. why: one sentence.
 - beliefs: up to 5 working beliefs, updated from what happened; evidence = what supports it; disprovedIf = what would show it wrong.
-- reply: 1–3 sentences in Hippo's voice introducing the Move. Style: ${STYLE(p)}. Never use the words task, workflow, hypothesis,
+- reply: 1–3 sentences in Hippo's voice introducing the Move. If something has happened, start from it ("Given what they told you — X — the next thing is …"). Style: ${STYLE(p)}. Never use the words task, workflow, hypothesis,
   belief, rung, methodology. ${p.casual ? 'Casual is fine.' : 'No slang.'}
 - consequential: true if it spends money, goes public, speaks to people in the founder's name, commits them, collects personal data,
   or involves a minor in any of these.
@@ -397,6 +443,21 @@ export const proofIn = (text: string) => text.match(URL_RE)?.[0];
  * quoted ₹70") → a Signal. Deterministic first pass; the model refines nuance. Money received is a verified outcome
  * only with proof; otherwise it stays founder-reported.
  */
+/** The founder reports what real people told them ("I talked to 3 women, they said …"). */
+export function readEvidence(text: string): boolean {
+  const t = n0(text);
+  return /\b(talked|spoke|spoken|asked|met|called|interviewed|showed|surveyed|chatted)\b[^.]{0,60}\b(they|she|he|all|everyone|people|women|men|customers|users|parents|owners|most|some|\d+|three|two|five)\b/.test(t)
+    || /\b(they|she|he|people|customers|women|men|users|parents|owners|everyone|all of them)\b[^.]{0,25}\b(said|say|says|told me|mentioned|complained)\b/.test(t);
+}
+/** A different business entirely — not pushback on the current one ("build the platform", "just make the app"). */
+export function isNewBusiness(text: string, objective: string): boolean {
+  const t = n0(text).trim();
+  if (words(t).length < 3) return false;
+  if (/^(just |please |no,? )?(build|make|launch|create|develop|do|start)( it| the| my| our| an?)?\b/.test(t) && similar(t, objective) > 0) return false;
+  if (/^(just |please |no,? )?(build|make|launch|create|develop) (it|the (app|platform|website|product|thing))\b/.test(t)) return false;
+  return similar(t, objective) < 0.34;
+}
+
 export function readSignal(text: string): ReadSignal | null {
   const t = n0(text);
   const summary = text.trim().slice(0, 400);

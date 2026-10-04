@@ -61,8 +61,9 @@ export async function moveContext(objectiveId: string, reason: MoveReason, opts:
   const conv = await conversationFor(objectiveId);
   const s = stateOf(conv);
   const [history, outcomes, beliefs] = await Promise.all([
-    db.move.findMany({ where: { objectiveId }, orderBy: { createdAt: 'asc' }, take: 12 }),
-    db.outcome.findMany({ where: { objectiveId, moveId: { not: null } }, orderBy: { createdAt: 'asc' }, take: 12 }),
+    // The most recent 12 (oldest first): what just happened must always be in view. Evidence reported before any Move counts too.
+    db.move.findMany({ where: { objectiveId }, orderBy: { createdAt: 'desc' }, take: 12 }).then((r) => r.reverse()),
+    db.outcome.findMany({ where: { objectiveId, AND: [{ OR: [{ moveId: { not: null } }, { source: 'FOUNDER_REPORTED' }] }, { OR: [{ external: null }, { external: true }] }] }, orderBy: { createdAt: 'desc' }, take: 12 }).then((r) => r.reverse()),
     beliefsFor(objective.organizationId, objectiveId),
   ]);
   const negative = new Set(outcomes.filter((o) => o.polarity === 'NEGATIVE').map((o) => o.moveId));
@@ -77,7 +78,7 @@ export async function moveContext(objectiveId: string, reason: MoveReason, opts:
     constraints: s.constraints, knownFacts: s.known_facts.map((f) => ({ key: f.key, quote: f.quote })), unknowns: s.unknowns, preferences: s.founder_preferences,
     profile: s.profile || {}, capacity: s.capacity || emptyCapacity(), beliefs,
     history: history.map((h) => ({ title: h.title, kind: h.kind, routeKey: h.routeKey, status: h.status, closeReason: h.closeReason, negative: negative.has(h.id) })),
-    signals: outcomes.map((o) => ({ summary: o.summary, polarity: o.polarity || 'NEUTRAL', source: o.source || 'FOUNDER_REPORTED', at: o.createdAt.toISOString() })),
+    signals: outcomes.map((o) => ({ summary: o.summary, polarity: o.polarity || 'NEUTRAL', source: o.source || 'FOUNDER_REPORTED', at: o.createdAt.toISOString(), rung: o.rung ?? undefined })),
     reason: REASON_TEXT[reason], reasonCode: reason, instruction: opts.instruction, blockedRoutes: opts.blockedRoutes || [], research, company: objective.companyName,
   };
   return { ctx, objective };
@@ -306,6 +307,15 @@ export async function recordSignal(moveId: string, s: { summary: string; polarit
     await db.conversation.update({ where: { id: conv.id }, data: { state: json(st) } });
   }
   return outcome;
+}
+
+/** Evidence the founder reported before there was a Move ("I talked to 3 women, they said …"): kept as founder-reported
+ *  signals of this business and in the Ledger, so the first Move starts from it instead of rediscovering it. */
+export async function recordEarlyEvidence(objective: { id: string; organizationId: string }, items: { summary: string; polarity: string }[]) {
+  for (const e of items) {
+    const outcome = await db.outcome.create({ data: { objectiveId: objective.id, summary: e.summary.slice(0, 2000), metrics: json([]), recordedBy: 'Founder', rung: 4, source: 'FOUNDER_REPORTED', polarity: e.polarity, moveId: null } });
+    await ledger({ organizationId: objective.organizationId, objectiveId: objective.id }, 'OUTCOME', e.summary, 'You reported', 'FOUNDER_STATED', `signal:${outcome.id}`);
+  }
 }
 
 /** Parks the Move ("not now") or brings it back. */

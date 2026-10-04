@@ -12,10 +12,10 @@ import { createObjective } from './service';
 import type { Understanding } from './types';
 import {
   CONSEQUENCE_LABEL, materialChange, mergeCapacity, mergeProfile, movingControl, movingTurnPrompt, MOVING_TURN_SCHEMA, parseMovingTurn,
-  proofIn, readFounderSignals, readSignal, validateMove, emptyCapacity, type MoveControl, type ProposedMove,
+  isNewBusiness, proofIn, readEvidence, readFounderSignals, readSignal, validateMove, emptyCapacity, type MoveControl, type ProposedMove,
 } from './moves';
 import {
-  activeMoveJob, approveMove, currentMove, markActed, moveContext, pageUrl, parkMove, recordSignal, requestMove, rerouteMove, stateOf, whyMove,
+  activeMoveJob, approveMove, recordEarlyEvidence, currentMove, markActed, moveContext, pageUrl, parkMove, recordSignal, requestMove, rerouteMove, stateOf, whyMove,
 } from './move-service';
 import { resumeIfDue } from '../jobs/runtime';
 import { MOVE_RUN_MS } from './move-service';
@@ -47,7 +47,7 @@ export async function moveView(move: NonNullable<Awaited<ReturnType<typeof curre
     const ex = await db.execution.findFirst({ where: { workId: move.workId }, orderBy: { startedAt: 'desc' } });
     if (ex?.output) artifact = { type: 'DOCUMENT', title: ex.outputSummary || move.title, markdown: ex.output };
   } else if (move.artifactType === 'DEEP_RESEARCH') artifact = { type: 'DEEP_RESEARCH' };
-  const signals = await db.outcome.findMany({ where: { moveId: move.id, NOT: { external: false } }, orderBy: { createdAt: 'asc' } }); // self-tests aren't signals
+  const signals = await db.outcome.findMany({ where: { moveId: move.id, OR: [{ external: null }, { external: true }] }, orderBy: { createdAt: 'asc' } }); // self-tests aren't signals
   const reasons = move.consequentialReasons as string[];
   return {
     id: move.id, kind: move.kind, owner: move.owner, title: move.title, why: move.why, hippoWill: move.hippoWill, needs: move.needs as string[],
@@ -107,7 +107,12 @@ export async function applyMoveAction(ctx: { userId: string; founderId: string }
     case 'DID_IT': await markActed(move.id, actor, opts.proof); return opts.proof ? 'Got it — I saved the link. What happened? Tell me even if nobody replied.' : 'Nice. What happened? Tell me even if nobody replied — and paste a link or screenshot if you have one.';
     case 'WHY': return whyMove(move.id);
     case 'NEXT':
-      if (!['LIVE', 'SIGNALLED'].includes(move.status)) return "Let's get this one out first — or say “try another way” if it doesn't fit.";
+      if (!['LIVE', 'SIGNALLED'].includes(move.status)) {
+        // The next Move is already the answer — say how it follows from what just happened.
+        const last = await db.outcome.findFirst({ where: { objectiveId: move.objectiveId, OR: [{ external: null }, { external: true }] }, orderBy: { createdAt: 'desc' } });
+        if (last && last.createdAt <= move.createdAt) return `Given what just happened — ${last.summary.replace(/\.$/, '')} — the next thing we should do is: ${move.title.replace(/\.$/, '')}. ${move.why}`;
+        return "Let's get this one out first — or say “try another way” if it doesn't fit.";
+      }
       await rerouteMove(move.id, actor, 'NEXT'); return 'Let me work out what this tells us and what to do next.';
     case 'HELP': await rerouteMove(move.id, actor, 'HELP', opts.text); return move.owner === 'FOUNDER'
       ? "I can prepare everything, but I can't send it without your approval. I'm getting it down to the point where you only check it and press send — who to send it to first, the exact message for each, and what to reply if they answer."
@@ -124,6 +129,12 @@ async function handoff(ctx: Ctx, convId: string, s: BusinessState, reason: 'STAR
   const u: Understanding = { objective: s.objective?.value || 'Not stated yet', target: s.target?.value || 'Not stated yet', currentState: s.current_state?.value || 'Not stated yet', keyQuestion: 'What is the smallest real step that tests this?', businessKind: s.current_state ? 'UNCLEAR' : 'NEW_IDEA', source: 'FOUNDER_NUMBERS' };
   const created = await createObjective(ctx, { text: handoffText(s), mode: s.directions?.length ? 'EXPLORE' : 'IDEA', understanding: u });
   const objective = await db.objective.findUniqueOrThrow({ where: { id: created.objectiveId }, select: { id: true, organizationId: true } });
+  const early = (s.signals ?? []).filter((x) => !x.moveId);
+  if (early.length) {
+    await recordEarlyEvidence(objective, early);
+    s.signals = (s.signals ?? []).map((x) => (x.moveId ? x : { ...x, moveId: `early:${objective.id}` }));
+  }
+  s.evidenceOpen = false;
   await db.conversation.update({ where: { id: convId }, data: { phase: 'MOVING', status: 'ACTIVE', objectiveId: objective.id, state: json(s) } });
   return { objective, start: (words: { intro?: string; outro?: string } = {}) => requestMove(objective, ctx.user.id, reason, { instruction, ...words }) };
 }
@@ -191,7 +202,7 @@ export async function postMoveMessage(ctx: Ctx, conv: { id: string; phase: strin
       turn = parseMovingTurn(r.data);
       console.log(JSON.stringify({ event: 'hippo_move_turn', conversationId: conv.id, ...aiMeta(r) }));
     } catch (e) { console.error(JSON.stringify({ event: 'hippo_move_turn_fallback', error: e instanceof Error ? e.message.slice(0, 200) : String(e) })); }
-    const sig = readSignal(text);
+    const sig = readSignal(text) ?? (readEvidence(text) ? { summary: text.trim().slice(0, 400), polarity: 'POSITIVE' as const, rung: 4 as const } : null);
     const intent = turn?.intent && !(turn.intent === 'OTHER' && sig) ? turn.intent : sig ? 'SIGNAL' : 'OTHER'; // a plain outcome is never lost
     // Constraints the founder stated (deterministic reading + the model's literal extraction).
     s.capacity = mergeCapacity(s.capacity, { avoid: turn?.avoid ?? [], assets: turn?.assets ?? [], ...(turn?.budgetInr !== undefined && read.capacity.budgetInr === undefined ? { budgetInr: turn.budgetInr } : {}), ...(turn?.existingCustomers !== undefined && read.capacity.existingCustomers === undefined ? { existingCustomers: turn.existingCustomers } : {}) });
@@ -215,6 +226,11 @@ export async function postMoveMessage(ctx: Ctx, conv: { id: string; phase: strin
     }
     const mapped: Partial<Record<string, MoveControl>> = { ACTION_DONE: 'DID_IT', CANT: 'CANT', ANOTHER_WAY: 'ANOTHER_WAY', HELP: 'HELP', FAILED: 'FAILED', APPROVE: 'YES', NOT_NOW: 'NOT_NOW', NEXT: 'NEXT' };
     if (mapped[intent]) { await say(await applyMoveAction(actor, objective, mapped[intent]!, { text, proof: proofIn(text) })); return; }
+    if (intent === 'CHANGE_OBJECTIVE' && !isNewBusiness(text, s.objective?.value || '')) {
+      // Pushback on the same business ("build the platform") — never wipe what we've learned. Answer it; the Move stays.
+      await say(turn?.reply || "Same business — I hear you. Let's keep going from what we already know.");
+      return;
+    }
     if (intent === 'CHANGE_OBJECTIVE') {
       if (move) await db.move.update({ where: { id: move.id }, data: { status: 'SUPERSEDED', closeReason: 'founder changed the business' } });
       const fresh = { ...stateOf(null), profile: s.profile, capacity: s.capacity, previous_objectives: [...s.previous_objectives, ...(s.objective ? [{ objective: s.objective.value, known_facts: s.known_facts, at: new Date().toISOString() }] : [])].slice(-5) };
@@ -228,6 +244,16 @@ export async function postMoveMessage(ctx: Ctx, conv: { id: string; phase: strin
 
   // ---- discovery
   const phase = conv.phase as Phase;
+  // What the founder already heard from real people is kept as evidence (and carried into the first Move), never lost in chat.
+  const prevHippo = (await db.conversationMessage.findMany({ where: { conversationId: conv.id, role: 'HIPPO' }, orderBy: { createdAt: 'desc' }, take: 1 }))[0];
+  const early = (s.signals ?? []).filter((x) => !x.moveId);
+  if (readEvidence(text)) {
+    s.signals = [...(s.signals ?? []), { summary: text.trim().slice(0, 400), polarity: readSignal(text)?.polarity ?? 'POSITIVE', source: 'FOUNDER_REPORTED', at: new Date().toISOString(), moveId: '' }].slice(-12);
+    s.evidenceOpen = true;
+  } else if (s.evidenceOpen && early.length && /\?\s*$/.test(prevHippo?.text || '')) {
+    const last = early.at(-1)!; last.summary = `${last.summary} — they said: ${text.trim()}`.slice(0, 600); // the answer to "what did they say?"
+    s.evidenceOpen = false;
+  } else s.evidenceOpen = false;
   const choice = pickDirection(text, s);
   if (choice !== null && s.directions?.[choice]) {
     await startDirection(ctx, conv.id, s, choice, { intro: `${s.directions[choice].title} it is.` });
@@ -244,7 +270,7 @@ has_business_idea: false only when the founder has no product or business in min
   } catch (e) { console.error(JSON.stringify({ event: 'hippo_turn_fallback', conversationId: conv.id, error: e instanceof Error ? e.message.slice(0, 200) : String(e) })); }
   const ai = raw ? parseModelTurn(raw) : null;
   const r = applyTurn(s, phase === 'MOVING' ? 'DISCOVER' : phase, conv.status as Status, text, ai);
-  const ns: BusinessState = { ...r.state, profile: s.profile, capacity: s.capacity, noIdea: s.noIdea, ideaQuestions: s.ideaQuestions, directions: s.directions, recommended: s.recommended, recommendWhy: s.recommendWhy };
+  const ns: BusinessState = { ...r.state, profile: s.profile, capacity: s.capacity, signals: s.signals, evidenceOpen: s.evidenceOpen, noIdea: s.noIdea, ideaQuestions: s.ideaQuestions, directions: s.directions, recommended: s.recommended, recommendWhy: s.recommendWhy };
   if (r.intent === 'STOP') { await say(r.reply); await db.conversation.update({ where: { id: conv.id }, data: { state: json(ns), status: 'PAUSED', phase: 'DISCOVER' } }); return; }
 
   // "I don't know": at most two questions, then three directions with one recommended — never a questionnaire.

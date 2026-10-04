@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   consequentialReasons, emptyCapacity, fallbackMove, materialChange, mergeCapacity, mergeProfile, movesEnabled, movingControl, normaliseMove,
-  inventedClaims, readFounderSignals, readSignal, stripClaims, validateMove, type MoveContext, type ProposedMove,
+  inventedClaims, isNewBusiness, learningStage, readEvidence, readFounderSignals, readSignal, stripClaims, validateMove, type MoveContext, type ProposedMove,
 } from '../src/lib/hippo/moves';
 
 const move = (o: Partial<ProposedMove> = {}): ProposedMove => ({
@@ -130,6 +130,38 @@ describe('the founder never claims what they have not told us', () => {
     const reworded = move({ title: 'Send 5 local cafes a free Instagram idea sheet on WhatsApp', routeKey: 'cafe-whatsapp-messages' });
     expect(validateMove(reworded, ctx({ history, reasonCode: 'CANT' })).problems.join()).toMatch(/REPEATS_FAILED_ROUTE/);
     expect(validateMove(move({ title: 'Ask 3 shop owners you already know what is hard about Instagram', routeKey: 'ask-known-owners' }), ctx({ history, reasonCode: 'CANT' })).ok).toBe(true);
+  });
+});
+
+describe('learning from what the world said', () => {
+  const sig = (summary: string, polarity = 'POSITIVE', rung?: number) => ({ summary, polarity, source: 'FOUNDER_REPORTED', at: '', rung });
+  it('reads where the business is: untested → problem evidenced → demand → paid', () => {
+    expect(learningStage([]).stage).toBe('UNTESTED');
+    expect(learningStage([sig("They said they don't have time to visit tailors", 'NEUTRAL')]).stage).toBe('PROBLEM_EVIDENCED');
+    expect(learningStage([sig('Two replied and one asked for pricing')]).stage).toBe('DEMAND');
+    expect(learningStage([sig('One paid ₹499', 'POSITIVE', 5)]).stage).toBe('PAID');
+    expect(learningStage([sig('Nobody replied', 'NEGATIVE')]).stage).toBe('UNTESTED');
+  });
+  it('after problem evidence: no rediscovery, no app yet — but a concrete offer to the same people is fine', () => {
+    const c = ctx({ signals: [sig('I spoke to 3 women; no time to visit tailors, uncomfortable with male tailors')] });
+    expect(validateMove(move({ kind: 'TALK', title: 'Interview 5 more women about their tailor frustrations' }), c).problems.join()).toMatch(/REDISCOVERY/);
+    expect(validateMove(move({ kind: 'BUILD', title: 'Build the marketplace app' }), c).problems.join()).toMatch(/PREMATURE_SOFTWARE/);
+    expect(validateMove(move({ kind: 'TEST', title: 'Ask the 3 women if they will book a home visit at ₹300' }), c).ok).toBe(true);
+    expect(validateMove(move({ kind: 'TALK', title: 'Ask 2 women what they think of the measurements', researchJustification: 'We cannot price until we know if home measurement works' }), c).ok).toBe(true);
+    expect(validateMove(move({ kind: 'TALK', title: 'Interview 5 women about tailors' }), ctx()).ok).toBe(true); // before any evidence it is right
+  });
+  it('after demand: no more awareness outreach; after no response: not more of the same', () => {
+    expect(validateMove(move({ title: 'Send the idea sheet to 20 more cafes' }), ctx({ signals: [sig('One asked for pricing')] })).problems.join()).toMatch(/AWARENESS_AFTER_DEMAND/);
+    const history = [{ title: 'Send 5 local cafes a free idea sheet', kind: 'SELL', routeKey: 'cafe-dms', status: 'SIGNALLED', negative: true }];
+    expect(validateMove(move({ title: 'Send the idea sheet to 20 more cafes', routeKey: 'more-cafes' }), ctx({ history, signals: [sig('Nobody replied', 'NEGATIVE')] })).problems.join()).toMatch(/MORE_OF_THE_SAME|REPEATS_FAILED_ROUTE/);
+  });
+  it('founder-reported evidence is recognised in plain words; pushback is not a new business', () => {
+    expect(readEvidence('I talked to them and they say they need it')).toBe(true);
+    expect(readEvidence('I spoke to 3 women. They all said they don\'t have time')).toBe(true);
+    expect(readEvidence('I want to build an app')).toBe(false);
+    expect(isNewBusiness('build the platform', 'Women-focused tailoring marketplace in Mumbai')).toBe(false);
+    expect(isNewBusiness('just make the app', 'Women-focused tailoring marketplace in Mumbai')).toBe(false);
+    expect(isNewBusiness('Actually I want to open a bakery in Pune instead', 'Women-focused tailoring marketplace in Mumbai')).toBe(true);
   });
 });
 

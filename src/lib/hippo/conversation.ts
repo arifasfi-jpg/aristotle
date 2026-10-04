@@ -36,6 +36,7 @@ export type BusinessState = {
   directions?: DirectionChoice[];                  // the three directions offered
   recommended?: number; recommendWhy?: string; chosen?: number;
   signals?: { summary: string; polarity: string; source: string; at: string; moveId: string }[];
+  evidenceOpen?: boolean;                          // the founder just said they talked to people; their next answer adds to it
 };
 export const emptyState = (): BusinessState => ({ objective: null, target: null, current_state: null, constraints: [], known_facts: [], unknowns: [], founder_preferences: [], conversation_summary: '', probes: 0, previous_objectives: [] });
 

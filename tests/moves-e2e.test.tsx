@@ -36,6 +36,13 @@ const CAFE_ALT = mv({ kind: 'TEST', title: 'Ask 3 shop owners you already know w
 const CAFE_HELP = mv({ ...CAFE.move, title: 'Five ready-to-send cafe messages — you only press send', hippoWill: 'Chose the 5 cafes, wrote each message with their name and one specific idea, and the reply to send if they answer', needs: ['Check the 5 messages and press send'], routeKey: 'cafe instagram dms' });
 const CAFE_PRICE = mv({ kind: 'SELL', title: 'Offer the cafe that asked about price a ₹499 first month', why: 'One person is already asking about price — test whether they will pay.', bet: 'The cafe will say yes to a small paid trial', hippoWill: 'Write the reply with what they get for ₹499', needs: ['Send the reply'], expectedSignal: 'A yes, a counter-offer or a no', artifactBrief: 'Price reply', routeKey: 'cafe paid trial offer' });
 const CAFE_FOLLOWUP = mv({ kind: 'TEST', title: 'Walk into 2 cafes and show the idea sheet in person', why: 'Messages were ignored; in person is harder to ignore.', bet: 'Owners respond better face to face', hippoWill: 'Print-ready idea sheet and what to say', needs: ['Visit 2 cafes'], expectedSignal: 'Whether they take it and what they say', artifactBrief: 'In-person idea sheet', routeKey: 'cafe in person visit' });
+const CAFE_MORE = mv({ kind: 'SELL', title: 'Send the idea sheet to 20 more cafes', why: 'A bigger sample.', bet: 'More messages bring replies', hippoWill: 'Find 20 more cafes and write the messages', needs: ['Send 20 messages'], expectedSignal: 'Replies', artifactBrief: 'Messages', routeKey: 'more cafe messages' });
+const TAILOR = 'I want to build a women-focused tailoring marketplace.';
+const TAILOR_EVIDENCE = "I spoke to 3 women. They all said they don't have time to visit tailors, don't feel comfortable with male tailors, and travel is expensive.";
+const TAILOR_TALK = mv({ kind: 'TALK', title: 'Ask 3 women in Mumbai about their tailor frustrations', why: 'Before building an app, hear the problem from real women.', bet: 'Women find tailoring a hassle', hippoWill: 'Write 5 short questions and a note sheet', needs: ['Ask 3 women you know'], expectedSignal: 'What frustrates them about tailors', artifactBrief: 'Questions and note sheet', routeKey: 'women tailor interviews' });
+const TAILOR_REDISCOVER = mv({ kind: 'TALK', title: 'Interview 5 more women about what they want from a tailor', why: 'Understand them better.', bet: 'More detail helps', hippoWill: 'Write interview questions', needs: ['Interview 5 women'], expectedSignal: 'Their needs', artifactBrief: 'Interview guide', routeKey: 'more women interviews' });
+const TAILOR_APP = mv({ kind: 'BUILD', title: 'Build the tailoring marketplace app', why: 'Women need it.', bet: 'They will use the app', hippoWill: 'Write the app spec', needs: ['Hire a developer'], expectedSignal: 'Downloads', artifactBrief: 'App spec', routeKey: 'build marketplace app' });
+const TAILOR_CONCIERGE = mv({ kind: 'TEST', title: 'Get 3 women their clothes stitched by a woman tailor who comes home', why: 'They said: no time to visit, uncomfortable with male tailors, travel costs — test if we can deliver exactly that, by hand.', bet: 'Women will book and pay for a woman tailor who comes to them', hippoWill: 'Write the offer with a trial price, a simple home-measurement checklist, and a pickup/delivery plan; list where to find women tailors nearby', needs: ['Find 1 woman tailor nearby', 'Offer it to the 3 women at the trial price'], expectedSignal: 'How many book and pay, and what goes wrong with measurements, fitting and pickup', artifactBrief: 'Offer, measurement checklist, pickup plan', routeKey: 'concierge women tailor home visit' });
 const LUNCH = mv({ kind: 'SELL', owner: 'HIPPO', title: 'Pre-order page for home-cooked lunch boxes near offices', why: 'Office workers nearby want home food; test before cooking.', bet: 'Office workers will pre-order', hippoWill: 'Make and host the page', needs: ['Share the link with 2 office groups'], expectedSignal: 'Pre-order requests in 3 days', artifactType: 'PUBLIC_PAGE', artifactBrief: 'Lunch box pre-order page', routeKey: 'lunchbox preorder page' });
 
 function model(prompt: string): unknown {
@@ -44,10 +51,15 @@ function model(prompt: string): unknown {
   if (prompt.startsWith('MOVE ENGINE')) {
     prompts.push({ kind: 'move', text: prompt });
     const retry = prompt.includes('YOUR PREVIOUS PROPOSAL WAS REJECTED');
+    if (/objective: .*tailor/i.test(prompt)) {
+      if (!prompt.includes('\n- founder reported:')) return TAILOR_TALK;
+      return retry ? TAILOR_CONCIERGE : TAILOR_REDISCOVER; // the first try steps backwards (more interviews)
+    }
     if (prompt.includes('objective: I want to help local cafes')) {
       const why = (prompt.match(/WHY A NEW MOVE NOW: ([^\n]*)/) || [])[1] || '';
       if (why.includes('materially different activity')) return retry ? CAFE_ALT : CAFE_REWORDED; // first try is the same thing via WhatsApp
       if (why.includes('do far more of it')) return CAFE_HELP;
+      if (why.startsWith('the world responded') && !retry) return CAFE_MORE; // "do more of it" — must be refused after a no-reply or a price question
       if (why.startsWith('the world responded')) return /founder reported: Two cafes replied[^\n]*\n(?!- founder reported: I sent)/.test(prompt) && !prompt.includes('Nobody replied') ? CAFE_PRICE : CAFE_FOLLOWUP;
       return CAFE;
     }
@@ -58,7 +70,7 @@ function model(prompt: string): unknown {
     if (prompt.includes('Chosen direction: Weekend cooking classes')) return CLASS;
     if (prompt.includes('Chosen direction: Tiffin')) return TIFFIN;
     if (prompt.includes('Chosen direction')) return LUNCH;
-    if (prompt.includes('WHAT THE WORLD SAID:\n- founder reported') || prompt.includes('seen by Hippo')) return prompt.includes('seen by Hippo') ? mv({ kind: 'SELL', title: 'Reply to Priya and ask what price feels fair', why: 'A real parent responded.', bet: 'She will name a price', hippoWill: 'Draft the reply', needs: ['Send the reply'], expectedSignal: 'A price she would pay', artifactBrief: 'Reply draft', routeKey: 'ask first parent price' }) : PAGE;
+    if (prompt.includes('\n- founder reported:') || prompt.includes('\n- seen by Hippo:')) return prompt.includes('\n- seen by Hippo:') ? mv({ kind: 'SELL', title: 'Reply to Priya and ask what price feels fair', why: 'A real parent responded.', bet: 'She will name a price', hippoWill: 'Draft the reply', needs: ['Send the reply'], expectedSignal: 'A price she would pay', artifactBrief: 'Reply draft', routeKey: 'ask first parent price' }) : PAGE;
     return SAMPLE;
   }
   if (prompt.startsWith('PREPARE ARTIFACT')) {
@@ -94,6 +106,8 @@ function model(prompt: string): unknown {
     prompts.push({ kind: 'moving', text: prompt });
     if (/loved the animal round/.test(last)) return { intent: 'SIGNAL', reply: 'That’s a great sign!', signal: { summary: '5 of 6 friends finished the sample; they loved the animal round', polarity: 'POSITIVE', outcome: false } };
     if (/only have ₹500/.test(last)) return { intent: 'CORRECTION', reply: 'Noted — ₹500 it is.', budgetInr: 500 };
+    if (last === TAILOR_EVIDENCE) return { intent: 'OTHER', reply: 'Got it.' }; // the model misses it — the evidence must still be kept
+    if (/^build the platform/.test(last)) return { intent: 'CHANGE_OBJECTIVE', reply: "You're circling back to the app — let's earn it first." };
     if (/^Two replied/.test(last)) return { intent: 'SIGNAL', reply: "That's useful. One person is already asking about price. Let's test whether the offer is valuable enough to pay for.", signal: { summary: 'Two cafes replied; one asked for pricing', polarity: 'POSITIVE', outcome: false } };
     if (/what grade/.test(last)) return { intent: 'QUESTION', reply: 'Ages 8 to 12 — that’s who the sample is for.' };
     return { intent: 'OTHER', reply: 'Got it.' };
@@ -101,6 +115,10 @@ function model(prompt: string): unknown {
   if (prompt.startsWith('You are Hippo —')) {
     prompts.push({ kind: 'turn', text: prompt });
     if (last.startsWith('I am 10 years old')) return { intent: 'OBJECTIVE', reply: 'Love it.', ready_to_propose: true, objective: 'Quiz books for kids, written by a kid', target: '5,000 books through ecommerce', current_state: 'Just an idea', has_business_idea: true };
+    if (/ladies tailor/.test(last)) return { intent: 'OBJECTIVE', reply: 'Love it. Have you talked to any women about it?', ready_to_propose: false, has_business_idea: true, objective: 'Ladies tailor service in Mumbai' };
+    if (last === TAILOR) return { intent: 'OBJECTIVE', reply: 'A women-for-women tailoring service — love it.', ready_to_propose: true, objective: 'Women-focused tailoring marketplace in Mumbai', has_business_idea: true };
+    if (/they say they need it/.test(last)) return { intent: 'ANSWER', reply: 'You actually talked to them? What specifically did they say?', ready_to_propose: false, has_business_idea: true, objective: 'Women-focused tailoring marketplace in Mumbai' };
+    if (/^No time to visit/.test(last)) return { intent: 'ANSWER', reply: 'That is real.', ready_to_propose: true, has_business_idea: true, objective: 'Women-focused tailoring marketplace in Mumbai' };
     if (last.startsWith('I want to make money quickly')) return { intent: 'DONT_KNOW', reply: 'No problem.', ready_to_propose: false, has_business_idea: false };
     if (last === LAKH) return { intent: 'DONT_KNOW', reply: 'No problem.', ready_to_propose: false, has_business_idea: false, objective: 'Make ₹1 lakh a month' };
     return { intent: 'ANSWER', reply: 'Nice — and how much time could you give it?', ready_to_propose: true, has_business_idea: false };
@@ -290,7 +308,8 @@ describe.skipIf(!E2E)('V1 Moves (real Postgres)', () => {
     expect(directions).toMatch(/never name them\): obvious route[\s\S]*international analogue[\s\S]*founder specific/); // lenses: internal only
     expect(await db.objective.count({ where: { text: { contains: 'lunch boxes' } } })).toBeGreaterThanOrEqual(1);
     expect(v.messages.filter((m: Row) => ['HANDOFF', 'RESULT'].includes(m.kind))).toEqual([]); // no research handoff, no report
-    expect(await db.audit.count({ where: { paymentStatus: 'paid' } })).toBe(0);
+    const audits = (await db.objective.findMany({ where: { text: { contains: 'lunch boxes' } }, select: { auditId: true } })).map((o: Row) => o.auditId).filter(Boolean);
+    expect(await db.audit.count({ where: { id: { in: audits }, paymentStatus: 'paid' } })).toBe(0);
     // The founder can still go another way: "Try B instead" replaces the Move with one for that direction.
     const first = v.move.id;
     v = await say('Try B instead');
@@ -412,6 +431,72 @@ describe.skipIf(!E2E)('V1 Moves (real Postgres)', () => {
     const engine = prompts.filter((p) => p.kind === 'move').slice(-2).map((p) => p.text);
     expect(engine[1]).toMatch(/YOUR PREVIOUS PROPOSAL WAS REJECTED[\s\S]*REPEATS_FAILED_ROUTE/); // "same thing via WhatsApp" refused
     expect(v.move.title).toBe(CAFE_ALT.move.title);
+  }, 60_000);
+
+  it('LEARNS: tailoring — after women describe the problem, "what\'s next?" moves to delivering it (not more interviews, not an app)', async () => {
+    const { db, say } = await mods();
+    jar = new Map();
+    let v = await say(TAILOR);
+    expect(v.move.title).toBe(TAILOR_TALK.move.title);
+    const objectiveId = (await db.move.findUnique({ where: { id: v.move.id } })).objectiveId;
+    v = await say(TAILOR_EVIDENCE);
+    // Kept as durable memory: a founder-reported signal and a Ledger entry.
+    expect(await db.outcome.findFirst({ where: { objectiveId, summary: { contains: "don't have time to visit tailors" } } })).toMatchObject({ source: 'FOUNDER_REPORTED', polarity: 'POSITIVE' });
+    expect(await db.businessMemory.findFirst({ where: { objectiveId, refType: 'move-ledger', kind: 'OUTCOME', title: { contains: 'male tailors' } } })).toBeTruthy();
+    const engine = prompts.filter((p) => p.kind === 'move').slice(-2).map((p) => p.text);
+    expect(engine[0]).toMatch(/founder reported: I spoke to 3 women[\s\S]*WHERE THIS BUSINESS IS NOW[^\n]*Do NOT ask them to rediscover it/);
+    expect(engine[1]).toMatch(/YOUR PREVIOUS PROPOSAL WAS REJECTED[\s\S]*REDISCOVERY/); // "interview 5 more women" refused
+    expect(v.move.title).toBe(TAILOR_CONCIERGE.move.title);
+    expect(v.move.why).toMatch(/no time to visit, uncomfortable with male tailors, travel costs/);
+    v = await say("What's next?");
+    expect(lastHippo(v)).toMatch(/^Given what just happened — I spoke to 3 women\. They all said they don't have time to visit tailors[\s\S]* — the next thing we should do is: Get 3 women their clothes stitched by a woman tailor who comes home\./);
+    expect(v.move.title).toBe(TAILOR_CONCIERGE.move.title);
+    expect(await db.move.count({ where: { objectiveId, title: { contains: 'Interview' } } })).toBe(0);
+    // Pushing back ("build the platform") never wipes the business; the evidence-backed Move stays, and an app is refused.
+    v = await say('build the platform');
+    expect(v.phase).toBe('MOVING');
+    expect(v.move.title).toBe(TAILOR_CONCIERGE.move.title);
+    expect(lastHippo(v)).toMatch(/circling back to the app/);
+    const { validateMove, emptyCapacity } = await import('@/lib/hippo/moves');
+    const ctx = { objective: 'tailoring', constraints: [], knownFacts: [], unknowns: [], preferences: [], profile: {}, capacity: emptyCapacity(), beliefs: [], history: [], signals: [{ summary: TAILOR_EVIDENCE, polarity: 'POSITIVE', source: 'FOUNDER_REPORTED', at: '' }], reason: 'NEXT', blockedRoutes: [] };
+    expect(validateMove({ ...(TAILOR_APP.move as Record<string, unknown>), alternative: null, reply: '', beliefs: [] } as never, ctx).problems.join()).toMatch(/PREMATURE_SOFTWARE/);
+  }, 60_000);
+
+  it('LEARNS before any Move: "I talked to them…" + what they said in discovery becomes the first Move\'s evidence', async () => {
+    const { db, say } = await mods();
+    jar = new Map();
+    await say('I want to start a ladies tailor service in Mumbai, women for women');
+    await say('I talked to them and they say they need it');
+    const v = await say('No time to visit the tailor. Discomfort with mens tailors, travel cost');
+    const objectiveId = (await db.move.findUnique({ where: { id: v.move.id } })).objectiveId;
+    expect(await db.outcome.findFirst({ where: { objectiveId } })).toMatchObject({ source: 'FOUNDER_REPORTED', summary: 'I talked to them and they say they need it — they said: No time to visit the tailor. Discomfort with mens tailors, travel cost' });
+    expect(prompts.filter((p) => p.kind === 'move').at(-1)!.text).toContain('founder reported: I talked to them and they say they need it — they said: No time to visit the tailor');
+    expect(v.move.title).toBe(TAILOR_CONCIERGE.move.title);
+  }, 60_000);
+
+  it('LEARNS: "I sent it to 5 cafes. Nobody replied." → "what\'s next?" changes the approach (not "20 more cafes")', async () => {
+    const { db, say } = await mods();
+    let { v } = await cafeStart(say);
+    await say('ok');
+    v = await say('I sent it to 5 cafes. Nobody replied.');
+    const engine = prompts.filter((p) => p.kind === 'move').slice(-2).map((p) => p.text);
+    expect(engine[1]).toMatch(/YOUR PREVIOUS PROPOSAL WAS REJECTED[\s\S]*(MORE_OF_THE_SAME|REPEATS_FAILED_ROUTE)/);
+    expect(v.move.title).toBe(CAFE_FOLLOWUP.move.title);
+    v = await say("What's next?");
+    expect(lastHippo(v)).toMatch(/^Given what just happened — I sent it to 5 cafes\. Nobody replied — the next thing we should do is: Walk into 2 cafes/);
+    expect(await db.move.count({ where: { title: CAFE_MORE.move.title } })).toBe(0);
+  }, 60_000);
+
+  it('LEARNS: "Two replied and one asked for pricing" → "what\'s next?" is a commercial step (price / trial), not more outreach', async () => {
+    const { db, say } = await mods();
+    let { v } = await cafeStart(say);
+    await say('ok');
+    v = await say('Two replied and one asked for pricing.');
+    expect(prompts.filter((p) => p.kind === 'move').at(-1)!.text).toMatch(/YOUR PREVIOUS PROPOSAL WAS REJECTED[\s\S]*AWARENESS_AFTER_DEMAND/);
+    expect(v.move.title).toBe(CAFE_PRICE.move.title);
+    v = await say("What's next?");
+    expect(lastHippo(v)).toMatch(/the next thing we should do is: Offer the cafe that asked about price a ₹499 first month\./);
+    expect(await db.move.count({ where: { title: CAFE_MORE.move.title } })).toBe(0);
   }, 60_000);
 
   it('UI + public surface: one pinned Move card, plain words, the native page (draft hidden, views and self-tests not counted) and the Ledger', async () => {
